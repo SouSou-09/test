@@ -150,6 +150,9 @@ impl ApplicationHandler for App {
                 state.camera.aspect_ratio = size.width.max(1) as f32 / size.height.max(1) as f32;
                 state.renderer.resize(size.width.max(1), size.height.max(1));
             }
+            WindowEvent::Focused(false) => {
+                state.keys.clear();
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     match event.state {
