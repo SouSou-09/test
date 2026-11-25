@@ -8,7 +8,7 @@ pub const MAX_POINT_LIGHTS: usize = 8;
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub translation: Vec3,
-    pub rotation: Vec3,
+    pub rotation: Quat,
     pub scale: Vec3,
 }
 
@@ -16,22 +16,13 @@ impl Transform {
     pub fn new(translation: Vec3, rotation: Vec3, scale: Vec3) -> Self {
         Self {
             translation,
-            rotation,
+            rotation: Quat::from_euler(EulerRot::YXZ, rotation.y, rotation.x, rotation.z),
             scale,
         }
     }
 
     pub fn matrix(&self) -> Mat4 {
-        Mat4::from_scale_rotation_translation(
-            self.scale,
-            Quat::from_euler(
-                EulerRot::YXZ,
-                self.rotation.y,
-                self.rotation.x,
-                self.rotation.z,
-            ),
-            self.translation,
-        )
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 }
 
@@ -129,8 +120,11 @@ impl Object {
                 );
         }
         if let Some(spin) = self.spin {
-            let angle = time * spin.radians_per_second;
-            self.transform.rotation += spin.axis * angle;
+            if spin.axis.length_squared() > 0.000001 {
+                let spin_rotation =
+                    Quat::from_axis_angle(spin.axis.normalize(), time * spin.radians_per_second);
+                self.transform.rotation = spin_rotation * self.base.rotation;
+            }
         }
     }
 }
@@ -340,5 +334,27 @@ mod tests {
                 .iter()
                 .all(|object| object.bounding_radius().is_finite())
         );
+    }
+
+    #[test]
+    fn spin_preserves_its_rotation_axis() {
+        let axis = Vec3::new(0.3, 1.0, 0.1).normalize();
+        let mut object = Object::new(
+            MeshKind::Torus,
+            Transform::new(Vec3::ZERO, Vec3::ZERO, Vec3::ONE),
+            Material::new(Vec3::ONE, 0.8, 0.2),
+        );
+        object.spin = Some(Spin {
+            axis,
+            radians_per_second: 0.35,
+        });
+        object.update(1.73);
+
+        let rotated_axis = object
+            .transform
+            .matrix()
+            .transform_vector3(axis)
+            .normalize();
+        assert!((rotated_axis - axis).length() < 0.0001);
     }
 }
