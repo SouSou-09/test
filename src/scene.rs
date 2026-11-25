@@ -1,9 +1,23 @@
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use rayon::prelude::*;
 
-use crate::{camera::Frustum, mesh::MeshKind};
+use crate::{
+    assets::{self, AssetMesh, AssetTexture},
+    camera::Frustum,
+    mesh::MeshKind,
+};
 
 pub const MAX_POINT_LIGHTS: usize = 8;
+pub const MATERIAL_TEXTURE_BASE_COLOR: f32 = 1.0;
+pub const MATERIAL_TEXTURE_NORMAL: f32 = 2.0;
+pub const MATERIAL_TEXTURE_METALLIC_ROUGHNESS: f32 = 4.0;
+pub const MATERIAL_TEXTURE_EMISSIVE: f32 = 8.0;
+pub const MATERIAL_TEXTURE_OCCLUSION: f32 = 16.0;
+pub const MATERIAL_UV2_BASE_COLOR: f32 = 32.0;
+pub const MATERIAL_UV2_NORMAL: f32 = 64.0;
+pub const MATERIAL_UV2_METALLIC_ROUGHNESS: f32 = 128.0;
+pub const MATERIAL_UV2_EMISSIVE: f32 = 256.0;
+pub const MATERIAL_UV2_OCCLUSION: f32 = 512.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
@@ -35,6 +49,8 @@ pub struct Material {
     /// 0: smooth, 1: procedural architectural concrete/windows, 2: mineral ground detail.
     pub detail_kind: f32,
     pub detail_scale: f32,
+    /// Bitmask: 1 base color, 2 normal, 4 metallic-roughness textures.
+    pub texture_flags: f32,
 }
 
 impl Material {
@@ -46,6 +62,7 @@ impl Material {
             emissive: Vec3::ZERO,
             detail_kind: 0.0,
             detail_scale: 1.0,
+            texture_flags: 0.0,
         }
     }
 
@@ -57,8 +74,48 @@ impl Material {
             emissive,
             detail_kind: 0.0,
             detail_scale: 1.0,
+            texture_flags: 0.0,
         }
     }
+}
+
+fn material_from_asset(material: assets::AssetMaterial) -> Material {
+    let mut result = Material::new(material.base_color, material.metallic, material.roughness);
+    result.emissive = material.emissive;
+    result.texture_flags = texture_flags(
+        material.base_color_texture,
+        material.base_color_tex_coord,
+        MATERIAL_TEXTURE_BASE_COLOR,
+        MATERIAL_UV2_BASE_COLOR,
+    ) + texture_flags(
+        material.normal_texture,
+        material.normal_tex_coord,
+        MATERIAL_TEXTURE_NORMAL,
+        MATERIAL_UV2_NORMAL,
+    ) + texture_flags(
+        material.metallic_roughness_texture,
+        material.metallic_roughness_tex_coord,
+        MATERIAL_TEXTURE_METALLIC_ROUGHNESS,
+        MATERIAL_UV2_METALLIC_ROUGHNESS,
+    ) + texture_flags(
+        material.emissive_texture,
+        material.emissive_tex_coord,
+        MATERIAL_TEXTURE_EMISSIVE,
+        MATERIAL_UV2_EMISSIVE,
+    ) + texture_flags(
+        material.occlusion_texture,
+        material.occlusion_tex_coord,
+        MATERIAL_TEXTURE_OCCLUSION,
+        MATERIAL_UV2_OCCLUSION,
+    );
+    result
+}
+
+fn texture_flags(texture: Option<usize>, tex_coord: u32, texture_bit: f32, uv2_bit: f32) -> f32 {
+    if texture.is_none() {
+        return 0.0;
+    }
+    texture_bit + if tex_coord == 1 { uv2_bit } else { 0.0 }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +136,7 @@ pub struct Orbit {
 #[derive(Clone, Debug)]
 pub struct Object {
     pub mesh: MeshKind,
+    pub bounding_radius: Option<f32>,
     pub base: Transform,
     pub transform: Transform,
     pub material: Material,
@@ -90,6 +148,7 @@ impl Object {
     pub fn new(mesh: MeshKind, base: Transform, material: Material) -> Self {
         Self {
             mesh,
+            bounding_radius: None,
             base,
             transform: base,
             material,
@@ -99,12 +158,13 @@ impl Object {
     }
 
     pub fn bounding_radius(&self) -> f32 {
-        let mesh_radius = match self.mesh {
+        let mesh_radius = self.bounding_radius.unwrap_or(match self.mesh {
             MeshKind::Cube => 1.732,
             MeshKind::Sphere => 1.0,
             MeshKind::Plane => std::f32::consts::FRAC_1_SQRT_2,
             MeshKind::Torus => 0.97,
-        };
+            MeshKind::Gltf(_) => 1.0,
+        });
         mesh_radius * self.transform.scale.max_element()
     }
 
@@ -140,11 +200,25 @@ pub struct PointLight {
 #[derive(Clone, Debug)]
 pub struct Scene {
     pub objects: Vec<Object>,
+    pub asset_meshes: Vec<AssetMesh>,
+    pub asset_textures: Vec<AssetTexture>,
     pub point_lights: Vec<PointLight>,
     pub sun_direction: Vec3,
     pub sun_color: Vec3,
     pub sun_intensity: f32,
     pub time: f32,
+}
+
+fn demo_asset_path() -> std::path::PathBuf {
+    let runtime = std::path::PathBuf::from("assets/models/WaterBottle.glb");
+    if runtime.exists() {
+        runtime
+    } else {
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/models/WaterBottle.glb"
+        ))
+    }
 }
 
 impl Scene {
@@ -276,14 +350,71 @@ impl Scene {
             })
             .collect();
 
-        Self {
+        let mut scene = Self {
             objects,
+            asset_meshes: Vec::new(),
+            asset_textures: Vec::new(),
             point_lights,
             sun_direction: Vec3::new(-0.42, -0.78, -0.46).normalize(),
             sun_color: Vec3::new(1.0, 0.86, 0.68),
             sun_intensity: 3.2,
             time: 0.0,
+        };
+
+        let model_path = demo_asset_path();
+        let asset_transform = Transform::new(
+            Vec3::new(3.0, 1.08, 5.0),
+            Vec3::new(0.0, 0.55, 0.0),
+            Vec3::splat(8.0),
+        );
+        if let Err(error) = scene.add_gltf_object(&model_path, asset_transform) {
+            log::warn!(
+                "failed to load bundled glTF asset {}: {error:#}",
+                model_path.display()
+            );
         }
+        scene
+    }
+
+    pub fn add_gltf_object(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+        transform: Transform,
+    ) -> anyhow::Result<usize> {
+        let asset = assets::load_gltf(path)?;
+        let texture_offset = self.asset_textures.len();
+        let mut created = 0;
+        for mut asset_mesh in asset.meshes {
+            if let Some(index) = asset_mesh.material.base_color_texture.as_mut() {
+                *index += texture_offset;
+            }
+            if let Some(index) = asset_mesh.material.normal_texture.as_mut() {
+                *index += texture_offset;
+            }
+            if let Some(index) = asset_mesh.material.metallic_roughness_texture.as_mut() {
+                *index += texture_offset;
+            }
+            if let Some(index) = asset_mesh.material.emissive_texture.as_mut() {
+                *index += texture_offset;
+            }
+            if let Some(index) = asset_mesh.material.occlusion_texture.as_mut() {
+                *index += texture_offset;
+            }
+            let material = material_from_asset(asset_mesh.material);
+            let mesh_index = self.asset_meshes.len() as u32;
+            let bounding_radius = asset_mesh.mesh.bounding_radius;
+            self.asset_meshes.push(asset_mesh);
+            let mut object = Object::new(MeshKind::Gltf(mesh_index), transform, material);
+            object.bounding_radius = Some(bounding_radius);
+            object.spin = Some(Spin {
+                axis: Vec3::Y,
+                radians_per_second: 0.18,
+            });
+            self.objects.push(object);
+            created += 1;
+        }
+        self.asset_textures.extend(asset.textures);
+        Ok(created)
     }
 
     pub fn update(&mut self, dt: f32) {

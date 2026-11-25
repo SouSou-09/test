@@ -7,6 +7,7 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tangent: [f32; 4],
+    pub uv2: [f32; 2],
 }
 
 impl Vertex {
@@ -22,6 +23,7 @@ impl Vertex {
             normal: normal.normalize().to_array(),
             uv: uv.to_array(),
             tangent: [tangent.x, tangent.y, tangent.z, tangent_sign],
+            uv2: uv.to_array(),
         }
     }
 }
@@ -34,7 +36,7 @@ pub struct MeshData {
 }
 
 impl MeshData {
-    fn finish(mut self) -> Self {
+    pub fn finish(mut self) -> Self {
         self.bounding_radius = self
             .vertices
             .iter()
@@ -50,6 +52,7 @@ pub enum MeshKind {
     Sphere,
     Plane,
     Torus,
+    Gltf(u32),
 }
 
 impl MeshKind {
@@ -61,6 +64,7 @@ impl MeshKind {
             Self::Sphere => uv_sphere(48, 24),
             Self::Plane => plane(24, 24, 1.0),
             Self::Torus => torus(48, 16, 0.72, 0.25),
+            Self::Gltf(_) => unreachable!("glTF meshes are loaded from assets"),
         }
     }
 }

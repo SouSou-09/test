@@ -4,6 +4,7 @@
 //! culling, procedural mesh generation, scene representation, and the wgpu
 //! renderer. The binary in `main.rs` is a reference sandbox using these pieces.
 
+pub mod assets;
 pub mod camera;
 pub mod mesh;
 pub mod renderer;

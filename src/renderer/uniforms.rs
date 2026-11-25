@@ -104,7 +104,12 @@ impl InstanceUniform {
                 material.emissive.y,
                 material.emissive.z,
             ],
-            material_params: [material.detail_kind, material.detail_scale, 0.0, 0.0],
+            material_params: [
+                material.detail_kind,
+                material.detail_scale,
+                material.texture_flags,
+                0.0,
+            ],
         }
     }
 }
