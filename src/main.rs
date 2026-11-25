@@ -48,14 +48,16 @@ impl AppState {
     }
 
     fn set_mouse_captured(&mut self, captured: bool) {
-        self.mouse_captured = captured;
-        let mode = if captured {
-            CursorGrabMode::Confined
+        self.mouse_captured = if captured {
+            self.window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .or_else(|_| self.window.set_cursor_grab(CursorGrabMode::Locked))
+                .is_ok()
         } else {
-            CursorGrabMode::None
+            let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+            false
         };
-        let _ = self.window.set_cursor_grab(mode);
-        self.window.set_cursor_visible(!captured);
+        self.window.set_cursor_visible(!self.mouse_captured);
     }
 
     fn update_camera(&mut self, dt: f32) {
