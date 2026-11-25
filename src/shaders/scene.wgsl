@@ -29,6 +29,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) tangent: vec4<f32>,
+    @location(15) uv2: vec2<f32>,
     @location(4) model0: vec4<f32>,
     @location(5) model1: vec4<f32>,
     @location(6) model2: vec4<f32>,
@@ -54,6 +55,7 @@ struct VertexOutput {
     @location(7) emissive: vec3<f32>,
     @location(8) material_params: vec4<f32>,
     @location(9) world_tangent: vec4<f32>,
+    @location(10) uv2: vec2<f32>,
 };
 
 @vertex
@@ -71,12 +73,13 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.view_normal = view_normal;
     output.view_depth = -(frame.view * world).z;
     output.uv = input.uv;
+    output.uv2 = input.uv2;
     output.base_color = input.base_color_metallic.rgb;
     output.metallic_roughness = vec2<f32>(input.base_color_metallic.w, input.roughness_emissive.x);
     output.emissive = input.roughness_emissive.yzw;
     output.material_params = input.material_params;
     output.world_tangent = vec4<f32>(
-        normalize((normal_model * vec4<f32>(input.tangent.xyz, 0.0)).xyz),
+        normalize((model * vec4<f32>(input.tangent.xyz, 0.0)).xyz),
         input.tangent.w,
     );
     return output;
@@ -202,23 +205,28 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     var emissive = input.emissive;
     let texture_flags = u32(input.material_params.z + 0.5);
 
+    let base_uv = select(input.uv, input.uv2, (texture_flags & 32u) != 0u);
+    let normal_uv = select(input.uv, input.uv2, (texture_flags & 64u) != 0u);
+    let metallic_roughness_uv = select(input.uv, input.uv2, (texture_flags & 128u) != 0u);
+    let emissive_uv = select(input.uv, input.uv2, (texture_flags & 256u) != 0u);
+    let occlusion_uv = select(input.uv, input.uv2, (texture_flags & 512u) != 0u);
     if (texture_flags & 1u) != 0u {
-        albedo *= textureSample(base_color_texture, material_sampler, input.uv).rgb;
+        albedo *= textureSample(base_color_texture, material_sampler, base_uv).rgb;
     }
     if (texture_flags & 4u) != 0u {
-        let metallic_roughness = textureSample(metallic_roughness_texture, material_sampler, input.uv);
+        let metallic_roughness = textureSample(metallic_roughness_texture, material_sampler, metallic_roughness_uv);
         metallic = clamp(metallic * metallic_roughness.b, 0.0, 1.0);
         roughness = clamp(roughness * metallic_roughness.g, 0.035, 1.0);
     }
     if (texture_flags & 8u) != 0u {
-        emissive *= textureSample(emissive_texture, material_sampler, input.uv).rgb;
+        emissive *= textureSample(emissive_texture, material_sampler, emissive_uv).rgb;
     }
     var occlusion = 1.0;
     if (texture_flags & 16u) != 0u {
-        occlusion = textureSample(occlusion_texture, material_sampler, input.uv).r;
+        occlusion = textureSample(occlusion_texture, material_sampler, occlusion_uv).r;
     }
     if (texture_flags & 2u) != 0u {
-        let tangent_normal = textureSample(normal_texture, material_sampler, input.uv).xyz * 2.0 - vec3<f32>(1.0);
+        let tangent_normal = textureSample(normal_texture, material_sampler, normal_uv).xyz * 2.0 - vec3<f32>(1.0);
         let tangent = normalize(input.world_tangent.xyz);
         let bitangent = cross(normal, tangent) * input.world_tangent.w;
         normal = normalize(

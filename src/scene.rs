@@ -13,6 +13,11 @@ pub const MATERIAL_TEXTURE_NORMAL: f32 = 2.0;
 pub const MATERIAL_TEXTURE_METALLIC_ROUGHNESS: f32 = 4.0;
 pub const MATERIAL_TEXTURE_EMISSIVE: f32 = 8.0;
 pub const MATERIAL_TEXTURE_OCCLUSION: f32 = 16.0;
+pub const MATERIAL_UV2_BASE_COLOR: f32 = 32.0;
+pub const MATERIAL_UV2_NORMAL: f32 = 64.0;
+pub const MATERIAL_UV2_METALLIC_ROUGHNESS: f32 = 128.0;
+pub const MATERIAL_UV2_EMISSIVE: f32 = 256.0;
+pub const MATERIAL_UV2_OCCLUSION: f32 = 512.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
@@ -77,22 +82,40 @@ impl Material {
 fn material_from_asset(material: assets::AssetMaterial) -> Material {
     let mut result = Material::new(material.base_color, material.metallic, material.roughness);
     result.emissive = material.emissive;
-    result.texture_flags = material
-        .base_color_texture
-        .map_or(0.0, |_| MATERIAL_TEXTURE_BASE_COLOR)
-        + material
-            .normal_texture
-            .map_or(0.0, |_| MATERIAL_TEXTURE_NORMAL)
-        + material
-            .metallic_roughness_texture
-            .map_or(0.0, |_| MATERIAL_TEXTURE_METALLIC_ROUGHNESS)
-        + material
-            .emissive_texture
-            .map_or(0.0, |_| MATERIAL_TEXTURE_EMISSIVE)
-        + material
-            .occlusion_texture
-            .map_or(0.0, |_| MATERIAL_TEXTURE_OCCLUSION);
+    result.texture_flags = texture_flags(
+        material.base_color_texture,
+        material.base_color_tex_coord,
+        MATERIAL_TEXTURE_BASE_COLOR,
+        MATERIAL_UV2_BASE_COLOR,
+    ) + texture_flags(
+        material.normal_texture,
+        material.normal_tex_coord,
+        MATERIAL_TEXTURE_NORMAL,
+        MATERIAL_UV2_NORMAL,
+    ) + texture_flags(
+        material.metallic_roughness_texture,
+        material.metallic_roughness_tex_coord,
+        MATERIAL_TEXTURE_METALLIC_ROUGHNESS,
+        MATERIAL_UV2_METALLIC_ROUGHNESS,
+    ) + texture_flags(
+        material.emissive_texture,
+        material.emissive_tex_coord,
+        MATERIAL_TEXTURE_EMISSIVE,
+        MATERIAL_UV2_EMISSIVE,
+    ) + texture_flags(
+        material.occlusion_texture,
+        material.occlusion_tex_coord,
+        MATERIAL_TEXTURE_OCCLUSION,
+        MATERIAL_UV2_OCCLUSION,
+    );
     result
+}
+
+fn texture_flags(texture: Option<usize>, tex_coord: u32, texture_bit: f32, uv2_bit: f32) -> f32 {
+    if texture.is_none() {
+        return 0.0;
+    }
+    texture_bit + if tex_coord == 1 { uv2_bit } else { 0.0 }
 }
 
 #[derive(Clone, Copy, Debug)]

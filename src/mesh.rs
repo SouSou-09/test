@@ -7,6 +7,7 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tangent: [f32; 4],
+    pub uv2: [f32; 2],
 }
 
 impl Vertex {
@@ -22,6 +23,7 @@ impl Vertex {
             normal: normal.normalize().to_array(),
             uv: uv.to_array(),
             tangent: [tangent.x, tangent.y, tangent.z, tangent_sign],
+            uv2: uv.to_array(),
         }
     }
 }

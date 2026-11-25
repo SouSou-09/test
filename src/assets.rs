@@ -23,12 +23,32 @@ pub struct AssetMaterial {
     pub metallic_roughness_texture: Option<usize>,
     pub emissive_texture: Option<usize>,
     pub occlusion_texture: Option<usize>,
+    pub base_color_tex_coord: u32,
+    pub normal_tex_coord: u32,
+    pub metallic_roughness_tex_coord: u32,
+    pub emissive_tex_coord: u32,
+    pub occlusion_tex_coord: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct AssetMesh {
     pub mesh: MeshData,
     pub material: AssetMaterial,
+}
+
+impl AssetMaterial {
+    pub fn max_tex_coord(&self) -> u32 {
+        [
+            self.base_color_tex_coord,
+            self.normal_tex_coord,
+            self.metallic_roughness_tex_coord,
+            self.emissive_tex_coord,
+            self.occlusion_tex_coord,
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -51,7 +71,7 @@ pub fn load_gltf(path: impl AsRef<Path>) -> Result<GltfAsset> {
         .or_else(|| document.scenes().next())
         .context("glTF file contains no scenes")?;
     for node in scene.nodes() {
-        visit_node(&node, Mat4::IDENTITY, &buffers, &mut meshes);
+        visit_node(&node, Mat4::IDENTITY, &buffers, &mut meshes)?;
     }
     if meshes.is_empty() {
         bail!("glTF scene contains no triangle mesh primitives");
@@ -64,31 +84,40 @@ fn visit_node(
     parent_transform: Mat4,
     buffers: &[gltf::buffer::Data],
     meshes: &mut Vec<AssetMesh>,
-) {
+) -> Result<()> {
     let local_transform = Mat4::from_cols_array_2d(&node.transform().matrix());
     let world_transform = parent_transform * local_transform;
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
             if primitive.mode() == gltf::mesh::Mode::Triangles {
-                if let Some(asset_mesh) = convert_primitive(&primitive, world_transform, buffers) {
+                if let Some(asset_mesh) = convert_primitive(&primitive, world_transform, buffers)? {
                     meshes.push(asset_mesh);
                 }
             }
         }
     }
     for child in node.children() {
-        visit_node(&child, world_transform, buffers, meshes);
+        visit_node(&child, world_transform, buffers, meshes)?;
     }
+    Ok(())
 }
 
 fn convert_primitive(
     primitive: &gltf::Primitive<'_>,
     transform: Mat4,
     buffers: &[gltf::buffer::Data],
-) -> Option<AssetMesh> {
+) -> Result<Option<AssetMesh>> {
     let reader =
         primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
-    let positions: Vec<[f32; 3]> = reader.read_positions()?.collect();
+    let material = convert_material(&primitive.material());
+    let max_tex_coord = material.max_tex_coord();
+    if max_tex_coord > 1 {
+        bail!("glTF material uses TEXCOORD_{max_tex_coord}; only UV sets 0 and 1 are supported");
+    }
+    let Some(positions) = reader.read_positions() else {
+        return Ok(None);
+    };
+    let positions: Vec<[f32; 3]> = positions.collect();
     let normals: Vec<[f32; 3]> = reader
         .read_normals()
         .map(|normals| normals.collect())
@@ -97,6 +126,10 @@ fn convert_primitive(
         .read_tex_coords(0)
         .map(|uvs| uvs.into_f32().collect())
         .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+    let uvs2: Vec<[f32; 2]> = reader
+        .read_tex_coords(1)
+        .map(|uvs| uvs.into_f32().collect())
+        .unwrap_or_else(|| uvs.clone());
     let tangents: Vec<[f32; 4]> = reader
         .read_tangents()
         .map(|tangents| tangents.collect())
@@ -116,7 +149,7 @@ fn convert_primitive(
             .transform_vector3(Vec3::from_array(normals[index]))
             .normalize_or_zero();
         let tangent = if let Some(raw_tangent) = tangents.get(index) {
-            let transformed = normal_transform
+            let transformed = transform
                 .transform_vector3(Vec3::new(raw_tangent[0], raw_tangent[1], raw_tangent[2]))
                 .normalize_or_zero();
             [transformed.x, transformed.y, transformed.z, raw_tangent[3]]
@@ -128,13 +161,16 @@ fn convert_primitive(
             normal: normal.to_array(),
             uv: uvs[index],
             tangent,
+            uv2: uvs2[index],
         });
     }
-    if reader.read_normals().is_none() {
-        compute_normals(&mut vertices, &indices);
+    let mut indices = indices;
+    let missing_normals = reader.read_normals().is_none();
+    if missing_normals {
+        make_flat_shaded(&mut vertices, &mut indices);
     }
-    if tangents.is_empty() {
-        compute_tangents(&mut vertices, &indices);
+    if tangents.is_empty() || missing_normals {
+        compute_tangents(&mut vertices, &indices, material.normal_tex_coord);
     }
 
     let mesh = MeshData {
@@ -143,14 +179,12 @@ fn convert_primitive(
         bounding_radius: 0.0,
     }
     .finish();
-    Some(AssetMesh {
-        mesh,
-        material: convert_material(&primitive.material()),
-    })
+    Ok(Some(AssetMesh { mesh, material }))
 }
 
-fn compute_normals(vertices: &mut [Vertex], indices: &[u32]) {
-    let mut normals = vec![Vec3::ZERO; vertices.len()];
+fn make_flat_shaded(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
+    let mut flat_vertices = Vec::with_capacity(indices.len());
+    let mut flat_indices = Vec::with_capacity(indices.len());
     for triangle in indices.chunks_exact(3) {
         let [a, b, c] = [
             triangle[0] as usize,
@@ -163,17 +197,19 @@ fn compute_normals(vertices: &mut [Vertex], indices: &[u32]) {
         let p0 = Vec3::from_array(vertices[a].position);
         let p1 = Vec3::from_array(vertices[b].position);
         let p2 = Vec3::from_array(vertices[c].position);
-        let normal = (p1 - p0).cross(p2 - p0);
+        let normal = (p1 - p0).cross(p2 - p0).normalize_or(Vec3::Y).to_array();
         for index in [a, b, c] {
-            normals[index] += normal;
+            let mut vertex = vertices[index];
+            vertex.normal = normal;
+            flat_indices.push(flat_vertices.len() as u32);
+            flat_vertices.push(vertex);
         }
     }
-    for (index, vertex) in vertices.iter_mut().enumerate() {
-        vertex.normal = normals[index].normalize_or(Vec3::Y).to_array();
-    }
+    *vertices = flat_vertices;
+    *indices = flat_indices;
 }
 
-fn compute_tangents(vertices: &mut [Vertex], indices: &[u32]) {
+fn compute_tangents(vertices: &mut [Vertex], indices: &[u32], tangent_uv_set: u32) {
     let mut tangents = vec![Vec3::ZERO; vertices.len()];
     let mut bitangents = vec![Vec3::ZERO; vertices.len()];
     for triangle in indices.chunks_exact(3) {
@@ -188,9 +224,9 @@ fn compute_tangents(vertices: &mut [Vertex], indices: &[u32]) {
         let p0 = Vec3::from_array(vertices[a].position);
         let p1 = Vec3::from_array(vertices[b].position);
         let p2 = Vec3::from_array(vertices[c].position);
-        let uv0 = Vec2::from_array(vertices[a].uv);
-        let uv1 = Vec2::from_array(vertices[b].uv);
-        let uv2 = Vec2::from_array(vertices[c].uv);
+        let uv0 = Vec2::from_array(vertex_uv(&vertices[a], tangent_uv_set));
+        let uv1 = Vec2::from_array(vertex_uv(&vertices[b], tangent_uv_set));
+        let uv2 = Vec2::from_array(vertex_uv(&vertices[c], tangent_uv_set));
         let edge1 = p1 - p0;
         let edge2 = p2 - p0;
         let delta_uv1 = uv1 - uv0;
@@ -234,30 +270,45 @@ fn compute_tangents(vertices: &mut [Vertex], indices: &[u32]) {
     }
 }
 
+fn vertex_uv(vertex: &Vertex, uv_set: u32) -> [f32; 2] {
+    if uv_set == 1 { vertex.uv2 } else { vertex.uv }
+}
+
 fn convert_material(material: &gltf::Material<'_>) -> AssetMaterial {
     let pbr = material.pbr_metallic_roughness();
     let base = pbr.base_color_factor();
     let emissive = material.emissive_factor();
+    let base_color_texture = pbr.base_color_texture();
+    let normal_texture = material.normal_texture();
+    let metallic_roughness_texture = pbr.metallic_roughness_texture();
+    let emissive_texture = material.emissive_texture();
+    let occlusion_texture = material.occlusion_texture();
     AssetMaterial {
         base_color: Vec3::new(base[0], base[1], base[2]),
         metallic: pbr.metallic_factor(),
         roughness: pbr.roughness_factor(),
         emissive: Vec3::new(emissive[0], emissive[1], emissive[2]),
-        base_color_texture: pbr
-            .base_color_texture()
+        base_color_texture: base_color_texture
+            .as_ref()
             .map(|texture| texture.texture().source().index()),
-        normal_texture: material
-            .normal_texture()
+        normal_texture: normal_texture
+            .as_ref()
             .map(|texture| texture.texture().source().index()),
-        metallic_roughness_texture: pbr
-            .metallic_roughness_texture()
+        metallic_roughness_texture: metallic_roughness_texture
+            .as_ref()
             .map(|texture| texture.texture().source().index()),
-        emissive_texture: material
-            .emissive_texture()
+        emissive_texture: emissive_texture
+            .as_ref()
             .map(|texture| texture.texture().source().index()),
-        occlusion_texture: material
-            .occlusion_texture()
+        occlusion_texture: occlusion_texture
+            .as_ref()
             .map(|texture| texture.texture().source().index()),
+        base_color_tex_coord: base_color_texture.map_or(0, |texture| texture.tex_coord()),
+        normal_tex_coord: normal_texture.map_or(0, |texture| texture.tex_coord()),
+        metallic_roughness_tex_coord: metallic_roughness_texture
+            .map_or(0, |texture| texture.tex_coord()),
+        emissive_tex_coord: emissive_texture.map_or(0, |texture| texture.tex_coord()),
+        occlusion_tex_coord: occlusion_texture.map_or(0, |texture| texture.tex_coord()),
     }
 }
 
