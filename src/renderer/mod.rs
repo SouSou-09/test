@@ -22,7 +22,7 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
 const MAX_INSTANCES: usize = 4096;
-const GPU_TIMER_SLOTS: usize = 3;
+const GPU_TIMER_SLOTS: usize = 4;
 const GPU_TIMER_PASSES: usize = 7;
 const GPU_TIMER_QUERIES_PER_FRAME: u32 = (GPU_TIMER_PASSES * 2) as u32;
 
@@ -43,6 +43,7 @@ pub struct Renderer {
     material_texture_cache: HashMap<(usize, bool), wgpu::Texture>,
     material_bind_group_cache: HashMap<MaterialCacheKey, wgpu::BindGroup>,
     gpu_timer: Option<GpuTimer>,
+    frame_index: u64,
     frame_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     shadow_instance_buffer: wgpu::Buffer,
@@ -112,6 +113,9 @@ pub struct RenderStats {
     pub shadow_draw_calls: usize,
     pub triangle_count: usize,
     pub frame_microseconds: u128,
+    pub frame_index: u64,
+    pub gpu_frame_index: Option<u64>,
+    pub gpu_timer_enabled: bool,
     pub gpu_frame_microseconds: f32,
     pub gpu_pass_microseconds: [f32; GPU_TIMER_PASSES],
 }
@@ -122,6 +126,11 @@ struct GpuTimer {
     readback_buffers: [wgpu::Buffer; GPU_TIMER_SLOTS],
     slot: usize,
     pending: [bool; GPU_TIMER_SLOTS],
+    slot_frame_indices: [u64; GPU_TIMER_SLOTS],
+    map_receivers:
+        [Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>; GPU_TIMER_SLOTS],
+    active: bool,
+    last_frame_index: Option<u64>,
     timestamp_period_nanoseconds: f32,
     frame_microseconds: f32,
     pass_microseconds: [f32; GPU_TIMER_PASSES],
@@ -160,6 +169,10 @@ impl GpuTimer {
             readback_buffers,
             slot: 0,
             pending: [false; GPU_TIMER_SLOTS],
+            slot_frame_indices: [0; GPU_TIMER_SLOTS],
+            map_receivers: std::array::from_fn(|_| None),
+            active: true,
+            last_frame_index: None,
             timestamp_period_nanoseconds: queue.get_timestamp_period(),
             frame_microseconds: 0.0,
             pass_microseconds: [0.0; GPU_TIMER_PASSES],
@@ -167,6 +180,9 @@ impl GpuTimer {
     }
 
     fn timestamp_writes(&self, pass_index: usize) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        if !self.active {
+            return None;
+        }
         let base = self.slot as u32 * GPU_TIMER_QUERIES_PER_FRAME + pass_index as u32 * 2;
         Some(wgpu::RenderPassTimestampWrites {
             query_set: &self.query_set,
@@ -176,59 +192,86 @@ impl GpuTimer {
     }
 
     fn begin_frame(&mut self, device: &wgpu::Device) {
+        self.active = true;
         if self.pending[self.slot] {
-            self.read_slot(device);
-            self.pending[self.slot] = false;
+            if self.read_slot(device) {
+                self.pending[self.slot] = false;
+            } else {
+                self.active = false;
+            }
         }
     }
 
-    fn finish_frame(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        let first = self.slot as u32 * GPU_TIMER_QUERIES_PER_FRAME;
-        encoder.resolve_query_set(
-            &self.query_set,
-            first..first + GPU_TIMER_QUERIES_PER_FRAME,
-            &self.resolve_buffers[self.slot],
-            0,
-        );
-        encoder.copy_buffer_to_buffer(
-            &self.resolve_buffers[self.slot],
-            0,
-            &self.readback_buffers[self.slot],
-            0,
-            (GPU_TIMER_QUERIES_PER_FRAME as u64) * 8,
-        );
-        self.pending[self.slot] = true;
+    fn finish_frame(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
+        if self.active {
+            let first = self.slot as u32 * GPU_TIMER_QUERIES_PER_FRAME;
+            encoder.resolve_query_set(
+                &self.query_set,
+                first..first + GPU_TIMER_QUERIES_PER_FRAME,
+                &self.resolve_buffers[self.slot],
+                0,
+            );
+            encoder.copy_buffer_to_buffer(
+                &self.resolve_buffers[self.slot],
+                0,
+                &self.readback_buffers[self.slot],
+                0,
+                (GPU_TIMER_QUERIES_PER_FRAME as u64) * 8,
+            );
+            self.pending[self.slot] = true;
+            self.slot_frame_indices[self.slot] = frame_index;
+        }
         self.slot = (self.slot + 1) % GPU_TIMER_SLOTS;
     }
 
-    fn read_slot(&mut self, device: &wgpu::Device) {
-        let buffer = &self.readback_buffers[self.slot];
-        let (sender, receiver) = std::sync::mpsc::channel();
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        if receiver.recv().is_ok() {
-            let Ok(data) = buffer.slice(..).get_mapped_range() else {
+    fn read_slot(&mut self, device: &wgpu::Device) -> bool {
+        if self.map_receivers[self.slot].is_none() {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            self.readback_buffers[self.slot].slice(..).map_async(
+                wgpu::MapMode::Read,
+                move |result| {
+                    let _ = sender.send(result);
+                },
+            );
+            self.map_receivers[self.slot] = Some(receiver);
+        }
+        let _ = device.poll(wgpu::PollType::Poll);
+        let Some(receiver) = &self.map_receivers[self.slot] else {
+            return true;
+        };
+        let result = receiver.try_recv();
+        match result {
+            Ok(Ok(())) => {
+                self.map_receivers[self.slot] = None;
+                let frame_index = self.slot_frame_indices[self.slot];
+                let buffer = &self.readback_buffers[self.slot];
+                let Ok(data) = buffer.slice(..).get_mapped_range() else {
+                    buffer.unmap();
+                    return true;
+                };
+                let mut timestamps = [0_u64; GPU_TIMER_PASSES * 2];
+                for (index, bytes) in data.chunks_exact(8).take(GPU_TIMER_PASSES * 2).enumerate() {
+                    timestamps[index] = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
+                }
+                for pass in 0..GPU_TIMER_PASSES {
+                    let elapsed = timestamps[pass * 2 + 1].saturating_sub(timestamps[pass * 2]);
+                    self.pass_microseconds[pass] =
+                        elapsed as f32 * self.timestamp_period_nanoseconds / 1000.0;
+                }
+                let frame_elapsed =
+                    timestamps[GPU_TIMER_PASSES * 2 - 1].saturating_sub(timestamps[0]);
+                self.frame_microseconds =
+                    frame_elapsed as f32 * self.timestamp_period_nanoseconds / 1000.0;
+                self.last_frame_index = Some(frame_index);
+                drop(data);
                 buffer.unmap();
-                return;
-            };
-            let mut timestamps = [0_u64; GPU_TIMER_PASSES * 2];
-            for (index, bytes) in data.chunks_exact(8).take(GPU_TIMER_PASSES * 2).enumerate() {
-                timestamps[index] = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
+                true
             }
-            for pass in 0..GPU_TIMER_PASSES {
-                let elapsed = timestamps[pass * 2 + 1].saturating_sub(timestamps[pass * 2]);
-                self.pass_microseconds[pass] =
-                    elapsed as f32 * self.timestamp_period_nanoseconds / 1000.0;
+            Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.map_receivers[self.slot] = None;
+                true
             }
-            let frame_elapsed = timestamps[GPU_TIMER_PASSES * 2 - 1].saturating_sub(timestamps[0]);
-            self.frame_microseconds =
-                frame_elapsed as f32 * self.timestamp_period_nanoseconds / 1000.0;
-            drop(data);
-            buffer.unmap();
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
         }
     }
 }
@@ -592,6 +635,7 @@ impl Renderer {
             material_texture_cache: HashMap::new(),
             material_bind_group_cache: HashMap::new(),
             gpu_timer,
+            frame_index: 0,
             frame_buffer,
             instance_buffer,
             shadow_instance_buffer,
@@ -737,6 +781,8 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Validation => return RenderStats::default(),
         };
 
+        self.frame_index += 1;
+        let frame_index = self.frame_index;
         let light_view_proj = directional_light_matrix(scene);
         let frame = FrameUniform::new(
             camera,
@@ -789,7 +835,7 @@ impl Renderer {
         self.bloom_passes(&mut encoder);
         self.composite_pass(&mut encoder, &surface_view);
         if let Some(timer) = self.gpu_timer.as_mut() {
-            timer.finish_frame(&mut encoder);
+            timer.finish_frame(&mut encoder, frame_index);
         }
 
         self.queue.submit([encoder.finish()]);
@@ -798,11 +844,17 @@ impl Renderer {
 
         let (scene_draw_calls, scene_triangles) = self.batch_geometry_stats(&batches);
         let (shadow_draw_calls, shadow_triangles) = self.batch_geometry_stats(&shadow_batches);
-        let (gpu_frame_microseconds, gpu_pass_microseconds) = self
+        let (gpu_frame_microseconds, gpu_pass_microseconds, gpu_frame_index) = self
             .gpu_timer
             .as_ref()
-            .map(|timer| (timer.frame_microseconds, timer.pass_microseconds))
-            .unwrap_or((0.0, [0.0; GPU_TIMER_PASSES]));
+            .map(|timer| {
+                (
+                    timer.frame_microseconds,
+                    timer.pass_microseconds,
+                    timer.last_frame_index,
+                )
+            })
+            .unwrap_or((0.0, [0.0; GPU_TIMER_PASSES], None));
         RenderStats {
             total_instances: scene.objects.len(),
             visible_instances: instances.len(),
@@ -812,6 +864,9 @@ impl Renderer {
             shadow_draw_calls,
             triangle_count: scene_triangles + shadow_triangles,
             frame_microseconds: frame_start.elapsed().as_micros(),
+            frame_index,
+            gpu_frame_index,
+            gpu_timer_enabled: self.gpu_timer.is_some(),
             gpu_frame_microseconds,
             gpu_pass_microseconds,
         }
@@ -1524,12 +1579,13 @@ fn create_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
     })
 }
 
-fn vertex_attributes() -> [wgpu::VertexAttribute; 4] {
+fn vertex_attributes() -> [wgpu::VertexAttribute; 5] {
     wgpu::vertex_attr_array![
         0 => Float32x3,
         1 => Float32x3,
         2 => Float32x2,
         3 => Float32x4,
+        15 => Float32x2,
     ]
 }
 
@@ -1807,7 +1863,7 @@ mod tests {
     #[test]
     fn instance_buffer_layout_is_std430_friendly() {
         assert_eq!(size_of::<InstanceUniform>(), 176);
-        assert_eq!(size_of::<Vertex>(), 48);
+        assert_eq!(size_of::<Vertex>(), 56);
     }
 
     #[test]

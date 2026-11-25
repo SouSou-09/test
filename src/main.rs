@@ -13,11 +13,12 @@ use winit::{
 
 struct BenchmarkState {
     target_frames: u32,
-    frame: u32,
-    measured_frames: u32,
-    cpu_submit_microseconds: u128,
-    cpu_scene_microseconds: u128,
-    gpu_microseconds: f32,
+    measured_cpu_frames: u32,
+    measured_gpu_frames: u32,
+    cpu_submit_microseconds: Vec<u128>,
+    cpu_scene_microseconds: Vec<u128>,
+    gpu_microseconds: Vec<f32>,
+    gpu_collected: Vec<bool>,
     done: bool,
 }
 
@@ -28,13 +29,15 @@ impl BenchmarkState {
             .parse::<u32>()
             .ok()?
             .max(1);
+        let sample_count = target_frames as usize;
         Some(Self {
             target_frames,
-            frame: 0,
-            measured_frames: 0,
-            cpu_submit_microseconds: 0,
-            cpu_scene_microseconds: 0,
-            gpu_microseconds: 0.0,
+            measured_cpu_frames: 0,
+            measured_gpu_frames: 0,
+            cpu_submit_microseconds: vec![0; sample_count],
+            cpu_scene_microseconds: vec![0; sample_count],
+            gpu_microseconds: vec![0.0; sample_count],
+            gpu_collected: vec![false; sample_count],
             done: false,
         })
     }
@@ -136,20 +139,38 @@ impl AppState {
         let stats = self.renderer.render(&self.scene, &self.camera);
 
         if let Some(benchmark) = self.benchmark.as_mut() {
-            benchmark.frame += 1;
-            if benchmark.frame > 30 && !benchmark.done {
-                benchmark.measured_frames += 1;
-                benchmark.cpu_submit_microseconds += stats.frame_microseconds;
-                benchmark.cpu_scene_microseconds += scene_microseconds;
-                benchmark.gpu_microseconds += stats.gpu_frame_microseconds;
-                if benchmark.measured_frames >= benchmark.target_frames {
-                    let frames = benchmark.measured_frames as f32;
+            if !benchmark.done && stats.frame_index > 0 {
+                let first_measured_frame = 31;
+                let last_measured_frame = 30 + benchmark.target_frames as u64;
+                if (first_measured_frame..=last_measured_frame).contains(&stats.frame_index) {
+                    let sample = (stats.frame_index - first_measured_frame) as usize;
+                    benchmark.cpu_submit_microseconds[sample] = stats.frame_microseconds;
+                    benchmark.cpu_scene_microseconds[sample] = scene_microseconds;
+                    benchmark.measured_cpu_frames += 1;
+                }
+                if let Some(gpu_frame_index) = stats.gpu_frame_index {
+                    if (first_measured_frame..=last_measured_frame).contains(&gpu_frame_index) {
+                        let sample = (gpu_frame_index - first_measured_frame) as usize;
+                        if !benchmark.gpu_collected[sample] {
+                            benchmark.gpu_collected[sample] = true;
+                            benchmark.gpu_microseconds[sample] = stats.gpu_frame_microseconds;
+                            benchmark.measured_gpu_frames += 1;
+                        }
+                    }
+                }
+                let gpu_done = !stats.gpu_timer_enabled
+                    || benchmark.measured_gpu_frames == benchmark.target_frames;
+                if benchmark.measured_cpu_frames == benchmark.target_frames && gpu_done {
+                    let frames = benchmark.target_frames as f32;
+                    let cpu_submit: u128 = benchmark.cpu_submit_microseconds.iter().sum();
+                    let cpu_scene: u128 = benchmark.cpu_scene_microseconds.iter().sum();
+                    let gpu: f32 = benchmark.gpu_microseconds.iter().sum();
                     println!(
                         "{{\"benchmark\":{{\"frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
-                        benchmark.measured_frames,
-                        benchmark.cpu_submit_microseconds as f32 / frames / 1000.0,
-                        benchmark.cpu_scene_microseconds as f32 / frames / 1000.0,
-                        benchmark.gpu_microseconds / frames / 1000.0,
+                        benchmark.target_frames,
+                        cpu_submit as f32 / frames / 1000.0,
+                        cpu_scene as f32 / frames / 1000.0,
+                        gpu / frames / 1000.0,
                         stats.visible_instances,
                         stats.culled_instances,
                         stats.scene_draw_calls,
