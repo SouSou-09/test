@@ -35,6 +35,7 @@ pub struct Renderer {
     meshes: HashMap<MeshKind, GpuMesh>,
     frame_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
+    shadow_instance_buffer: wgpu::Buffer,
     post_bright_buffer: wgpu::Buffer,
     post_horizontal_buffer: wgpu::Buffer,
     post_vertical_buffer: wgpu::Buffer,
@@ -296,12 +297,16 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("instance stream"),
-            size: (size_of::<InstanceUniform>() * MAX_INSTANCES) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let create_instance_buffer = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (size_of::<InstanceUniform>() * MAX_INSTANCES) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let instance_buffer = create_instance_buffer("visible instance stream");
+        let shadow_instance_buffer = create_instance_buffer("shadow instance stream");
         let create_post_buffer = |label: &str| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -391,6 +396,7 @@ impl Renderer {
             meshes,
             frame_buffer,
             instance_buffer,
+            shadow_instance_buffer,
             post_bright_buffer,
             post_horizontal_buffer,
             post_vertical_buffer,
@@ -460,12 +466,22 @@ impl Renderer {
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
 
-        let (instances, batches) = build_instances(scene, camera);
+        let (instances, batches) = build_visible_instances(scene, camera);
         if !instances.is_empty() {
             self.queue.write_buffer(
                 &self.instance_buffer,
                 0,
                 bytemuck::cast_slice(&instances[..instances.len().min(MAX_INSTANCES)]),
+            );
+        }
+        let (shadow_instances, shadow_batches) = build_shadow_instances(scene);
+        if !shadow_instances.is_empty() {
+            self.queue.write_buffer(
+                &self.shadow_instance_buffer,
+                0,
+                bytemuck::cast_slice(
+                    &shadow_instances[..shadow_instances.len().min(MAX_INSTANCES)],
+                ),
             );
         }
 
@@ -482,7 +498,7 @@ impl Renderer {
                 label: Some("photon frame"),
             });
 
-        self.shadow_pass(&mut encoder, &batches);
+        self.shadow_pass(&mut encoder, &shadow_batches);
         self.scene_pass(&mut encoder, &batches);
         self.ao_pass(&mut encoder);
         self.bloom_passes(&mut encoder);
@@ -537,7 +553,7 @@ impl Renderer {
         });
         pass.set_pipeline(&self.shadow_pipeline);
         pass.set_bind_group(0, &self.bind_groups.shadow, &[]);
-        self.draw_batches(&mut pass, batches);
+        self.draw_batches(&mut pass, &self.shadow_instance_buffer, batches);
     }
 
     fn scene_pass(&self, encoder: &mut wgpu::CommandEncoder, batches: &[Batch]) {
@@ -591,11 +607,16 @@ impl Renderer {
         });
         pass.set_pipeline(&self.scene_pipeline);
         pass.set_bind_group(0, &self.bind_groups.frame, &[]);
-        self.draw_batches(&mut pass, batches);
+        self.draw_batches(&mut pass, &self.instance_buffer, batches);
     }
 
-    fn draw_batches<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, batches: &[Batch]) {
-        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+    fn draw_batches<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        instance_buffer: &'a wgpu::Buffer,
+        batches: &[Batch],
+    ) {
+        pass.set_vertex_buffer(1, instance_buffer.slice(..));
         for batch in batches {
             let Some(mesh) = self.meshes.get(&batch.mesh) else {
                 continue;
@@ -845,14 +866,23 @@ fn directional_light_matrix(scene: &Scene) -> Mat4 {
     Mat4::orthographic_rh(-38.0, 38.0, -38.0, 38.0, 0.1, 110.0) * view
 }
 
-fn build_instances(scene: &Scene, camera: &Camera) -> (Vec<InstanceUniform>, Vec<Batch>) {
-    let visible = scene.visible_indices(&camera.frustum());
-    let mut instances = Vec::with_capacity(visible.len().min(MAX_INSTANCES));
+fn build_visible_instances(scene: &Scene, camera: &Camera) -> (Vec<InstanceUniform>, Vec<Batch>) {
+    build_instances(scene, scene.visible_indices(&camera.frustum()))
+}
+
+fn build_shadow_instances(scene: &Scene) -> (Vec<InstanceUniform>, Vec<Batch>) {
+    let mut indices: Vec<usize> = (0..scene.objects.len()).collect();
+    indices.sort_unstable_by_key(|&index| scene.objects[index].mesh);
+    build_instances(scene, indices)
+}
+
+fn build_instances(scene: &Scene, indices: Vec<usize>) -> (Vec<InstanceUniform>, Vec<Batch>) {
+    let mut instances = Vec::with_capacity(indices.len().min(MAX_INSTANCES));
     let mut batches = Vec::new();
     let mut active_mesh: Option<MeshKind> = None;
     let mut batch_start = 0_u32;
 
-    for index in visible.into_iter().take(MAX_INSTANCES) {
+    for index in indices.into_iter().take(MAX_INSTANCES) {
         let object = &scene.objects[index];
         if let Some(mesh) = active_mesh {
             if mesh != object.mesh {
@@ -1331,7 +1361,7 @@ mod tests {
     fn batches_are_contiguous_and_grouped_by_mesh() {
         let scene = Scene::demo();
         let camera = Camera::default();
-        let (instances, batches) = build_instances(&scene, &camera);
+        let (instances, batches) = build_visible_instances(&scene, &camera);
         assert!(!instances.is_empty());
         assert!(!batches.is_empty());
         assert!(batches.iter().all(|batch| batch.end > batch.start));
