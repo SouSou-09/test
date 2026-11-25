@@ -4,7 +4,7 @@
 
 Rust製のリアルタイム物理ベース3Dエンジンです。`wgpu` / WGSL を使い、GPUインスタンシング・データ指向シーン更新・HDRポストプロセスを備えた拡張可能な基盤として実装しています。
 
-現在のサンドボックスは約1,300個以上のオブジェクトを4つのメッシュバッチに整理し、PBRマテリアルグリッド、金属トーラス、プロシージャルな都市ジオメトリ、動的ポイントライトを描画します。
+現在のサンドボックスは約1,300個以上のオブジェクトをメッシュ種別ごとのインスタンスバッチに整理し、PBRマテリアルグリッド、金属トーラス、プロシージャルな都市ジオメトリ、CC0のglTF WaterBottle実アセット、動的ポイントライトを描画します。
 
 ## 実行
 
@@ -13,6 +13,24 @@ cargo run --release
 ```
 
 GPUドライバーとVulkan/Metal/DX12対応環境で実行してください。ソフトウェアRasterizer（llvmpipe）でも動作しますが、GPUを使わないため速度は出ません。
+
+## ベンチマーク
+
+ウィンドウタイトルにはfps、表示/カリング済みインスタンス数、scene/shadow draw call、三角形数、CPU submit/scene時間、GPUパス時間を表示します。GPU時間は`TIMESTAMP_QUERY`対応デバイスでshadow/scene/SSAO/bloom/compositeパスから取得します。
+
+固定フレーム数のJSONベンチマークも実行できます。
+
+```bash
+PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
+```
+
+出力例:
+
+```json
+{"benchmark":{"frames":5,"cpu_submit_ms_avg":126.5758,"cpu_scene_ms_avg":0.0836,"gpu_ms_avg":121.4311,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
+```
+
+この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。
 
 ## 操作
 
@@ -42,6 +60,10 @@ GPUドライバーとVulkan/Metal/DX12対応環境で実行してください。
 - 手続き sky gradient / sun disk
 - Narkowicz近似のACES filmic tone mapping
 - プロシージャル建築コンクリート / 窓 / 地表ミネラル detail
+- glTF 2.0 mesh/node transform loading
+- base color / normal / metallic-roughness / emissive / occlusion texture sampling
+- sRGB base color/emissive texture、linear metallic-roughness/normal/occlusion texture
+- tangent-space normal mapping（missing tangent時はUVから生成）
 - vignetteと少量のfilm grain
 
 ### 高速化設計
@@ -53,6 +75,8 @@ GPUドライバーとVulkan/Metal/DX12対応環境で実行してください。
 - `rayon`によるデータ並列シーン更新
 - release profileでthin LTO / single codegen unit
 - 動的メッシュ再生成を避け、プロシージャルメッシュはGPUリソースとして保持
+- glTF texture/mesh/material bind group cache
+- GPU timestamp queryによるパス別計測
 
 ## 参考にした論文・資料
 
@@ -91,6 +115,7 @@ GPUドライバーとVulkan/Metal/DX12対応環境で実行してください。
 ```text
 photon3d library
 ├─ camera.rs      camera math, view/projection, frustum planes
+├─ assets.rs      glTF import, image conversion, normals/tangents, material metadata
 ├─ mesh.rs        procedural indexed meshes, normals/tangents, validation tests
 ├─ scene.rs       data-oriented objects, materials, lights, animation, culling input
 └─ renderer/
@@ -115,7 +140,7 @@ scene update (parallel)
 
 これは完全な商用エンジンではなく、拡張可能な第一版です。次の重要項目は明確に分離して実装できます。
 
-- glTF mesh / texture / material loading
+- glTF alpha blending/masking、skinning、morph targets、texture transform
 - clustered forward+ light assignment
 - GPU compute frustum/occlusion culling と indirect draw
 - PCSS / cascaded shadow maps
@@ -130,4 +155,5 @@ scene update (parallel)
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
+PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 ```

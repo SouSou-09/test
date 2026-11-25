@@ -17,6 +17,13 @@ struct FrameUniform {
 @group(0) @binding(1) var shadow_map: texture_depth_2d;
 @group(0) @binding(2) var shadow_sampler: sampler_comparison;
 
+@group(1) @binding(0) var base_color_texture: texture_2d<f32>;
+@group(1) @binding(1) var normal_texture: texture_2d<f32>;
+@group(1) @binding(2) var metallic_roughness_texture: texture_2d<f32>;
+@group(1) @binding(3) var emissive_texture: texture_2d<f32>;
+@group(1) @binding(4) var occlusion_texture: texture_2d<f32>;
+@group(1) @binding(5) var material_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -46,6 +53,7 @@ struct VertexOutput {
     @location(6) metallic_roughness: vec2<f32>,
     @location(7) emissive: vec3<f32>,
     @location(8) material_params: vec4<f32>,
+    @location(9) world_tangent: vec4<f32>,
 };
 
 @vertex
@@ -67,6 +75,10 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     output.metallic_roughness = vec2<f32>(input.base_color_metallic.w, input.roughness_emissive.x);
     output.emissive = input.roughness_emissive.yzw;
     output.material_params = input.material_params;
+    output.world_tangent = vec4<f32>(
+        normalize((normal_model * vec4<f32>(input.tangent.xyz, 0.0)).xyz),
+        input.tangent.w,
+    );
     return output;
 }
 
@@ -182,12 +194,37 @@ struct FragmentOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> FragmentOutput {
-    let normal = normalize(input.world_normal);
+    var normal = normalize(input.world_normal);
     let view_dir = normalize(frame.camera_position_time.xyz - input.world_position);
     var albedo = input.base_color;
-    let metallic = clamp(input.metallic_roughness.x, 0.0, 1.0);
+    var metallic = clamp(input.metallic_roughness.x, 0.0, 1.0);
     var roughness = clamp(input.metallic_roughness.y, 0.035, 1.0);
     var emissive = input.emissive;
+    let texture_flags = u32(input.material_params.z + 0.5);
+
+    if (texture_flags & 1u) != 0u {
+        albedo *= textureSample(base_color_texture, material_sampler, input.uv).rgb;
+    }
+    if (texture_flags & 4u) != 0u {
+        let metallic_roughness = textureSample(metallic_roughness_texture, material_sampler, input.uv);
+        metallic = clamp(metallic * metallic_roughness.b, 0.0, 1.0);
+        roughness = clamp(roughness * metallic_roughness.g, 0.035, 1.0);
+    }
+    if (texture_flags & 8u) != 0u {
+        emissive *= textureSample(emissive_texture, material_sampler, input.uv).rgb;
+    }
+    var occlusion = 1.0;
+    if (texture_flags & 16u) != 0u {
+        occlusion = textureSample(occlusion_texture, material_sampler, input.uv).r;
+    }
+    if (texture_flags & 2u) != 0u {
+        let tangent_normal = textureSample(normal_texture, material_sampler, input.uv).xyz * 2.0 - vec3<f32>(1.0);
+        let tangent = normalize(input.world_tangent.xyz);
+        let bitangent = cross(normal, tangent) * input.world_tangent.w;
+        normal = normalize(
+            tangent * tangent_normal.x + bitangent * tangent_normal.y + normal * tangent_normal.z,
+        );
+    }
 
     let detail_kind = input.material_params.x;
     if detail_kind > 0.5 && detail_kind < 1.5 {
@@ -253,11 +290,12 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     let fresnel = fresnel_schlick(max(dot(normal, view_dir), 0.0), f0);
     let diffuse_ambient = sky_ambient(normal) * albedo * (1.0 - metallic) * 0.34;
     let specular_ambient = sky_ambient(reflection) * fresnel * pow(1.0 - roughness, 1.7) * 0.72;
-    color += diffuse_ambient + specular_ambient + emissive;
+    color += (diffuse_ambient + specular_ambient) * occlusion + emissive;
 
     var output: FragmentOutput;
     output.hdr_color = vec4<f32>(color, 1.0);
-    output.normal_material = vec4<f32>(normalize(input.view_normal) * 0.5 + vec3<f32>(0.5), roughness);
+    let shading_view_normal = normalize((frame.view * vec4<f32>(normal, 0.0)).xyz);
+    output.normal_material = vec4<f32>(shading_view_normal * 0.5 + vec3<f32>(0.5), roughness);
     output.view_depth = vec4<f32>(input.view_depth, 0.0, 0.0, 1.0);
     return output;
 }

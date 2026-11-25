@@ -11,6 +11,35 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
+struct BenchmarkState {
+    target_frames: u32,
+    frame: u32,
+    measured_frames: u32,
+    cpu_submit_microseconds: u128,
+    cpu_scene_microseconds: u128,
+    gpu_microseconds: f32,
+    done: bool,
+}
+
+impl BenchmarkState {
+    fn from_environment() -> Option<Self> {
+        let target_frames = std::env::var("PHOTON3D_BENCHMARK_FRAMES")
+            .ok()?
+            .parse::<u32>()
+            .ok()?
+            .max(1);
+        Some(Self {
+            target_frames,
+            frame: 0,
+            measured_frames: 0,
+            cpu_submit_microseconds: 0,
+            cpu_scene_microseconds: 0,
+            gpu_microseconds: 0.0,
+            done: false,
+        })
+    }
+}
+
 struct AppState {
     window: Arc<Window>,
     renderer: Renderer,
@@ -21,6 +50,7 @@ struct AppState {
     last_frame: Instant,
     fps_time: f32,
     fps_frames: u32,
+    benchmark: Option<BenchmarkState>,
 }
 
 impl AppState {
@@ -28,7 +58,9 @@ impl AppState {
         display: winit::event_loop::OwnedDisplayHandle,
         window: Arc<Window>,
     ) -> Result<Self> {
-        let renderer = Renderer::new(display, window.clone()).await?;
+        let mut renderer = Renderer::new(display, window.clone()).await?;
+        let scene = Scene::demo();
+        renderer.load_asset_meshes(&scene);
         let size = window.inner_size();
         let camera = Camera {
             aspect_ratio: size.width.max(1) as f32 / size.height.max(1) as f32,
@@ -37,13 +69,14 @@ impl AppState {
         Ok(Self {
             window,
             renderer,
-            scene: Scene::demo(),
+            scene,
             camera,
             keys: HashSet::new(),
             mouse_captured: false,
             last_frame: Instant::now(),
             fps_time: 0.0,
             fps_frames: 0,
+            benchmark: BenchmarkState::from_environment(),
         })
     }
 
@@ -97,19 +130,57 @@ impl AppState {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.update_camera(dt);
+        let scene_start = Instant::now();
         self.scene.update(dt);
+        let scene_microseconds = scene_start.elapsed().as_micros();
         let stats = self.renderer.render(&self.scene, &self.camera);
+
+        if let Some(benchmark) = self.benchmark.as_mut() {
+            benchmark.frame += 1;
+            if benchmark.frame > 30 && !benchmark.done {
+                benchmark.measured_frames += 1;
+                benchmark.cpu_submit_microseconds += stats.frame_microseconds;
+                benchmark.cpu_scene_microseconds += scene_microseconds;
+                benchmark.gpu_microseconds += stats.gpu_frame_microseconds;
+                if benchmark.measured_frames >= benchmark.target_frames {
+                    let frames = benchmark.measured_frames as f32;
+                    println!(
+                        "{{\"benchmark\":{{\"frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
+                        benchmark.measured_frames,
+                        benchmark.cpu_submit_microseconds as f32 / frames / 1000.0,
+                        benchmark.cpu_scene_microseconds as f32 / frames / 1000.0,
+                        benchmark.gpu_microseconds / frames / 1000.0,
+                        stats.visible_instances,
+                        stats.culled_instances,
+                        stats.scene_draw_calls,
+                        stats.shadow_draw_calls,
+                        stats.triangle_count,
+                    );
+                    benchmark.done = true;
+                }
+            }
+        }
 
         self.fps_time += dt;
         self.fps_frames += 1;
         if self.fps_time >= 0.5 {
             let fps = self.fps_frames as f32 / self.fps_time;
+            let post_gpu = stats.gpu_pass_microseconds[2..].iter().sum::<f32>() / 1000.0;
             self.window.set_title(&format!(
-                "Photon3D — {:.0} fps | {} / {} instances | CPU submit {:.2} ms",
+                "Photon3D — {:.0} fps | {}/{} inst ({} culled) | draws {}+{} | tris {:.1}k | CPU {:.2}/{:.2} ms | GPU {:.2} ms (shadow {:.2}, scene {:.2}, post {:.2})",
                 fps,
                 stats.visible_instances,
                 stats.total_instances,
+                stats.culled_instances,
+                stats.scene_draw_calls,
+                stats.shadow_draw_calls,
+                stats.triangle_count as f32 / 1000.0,
                 stats.frame_microseconds as f32 / 1000.0,
+                scene_microseconds as f32 / 1000.0,
+                stats.gpu_frame_microseconds / 1000.0,
+                stats.gpu_pass_microseconds[0] / 1000.0,
+                stats.gpu_pass_microseconds[1] / 1000.0,
+                post_gpu,
             ));
             self.fps_time = 0.0;
             self.fps_frames = 0;
@@ -183,6 +254,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 state.frame();
+                if state
+                    .benchmark
+                    .as_ref()
+                    .is_some_and(|benchmark| benchmark.done)
+                {
+                    event_loop.exit();
+                    return;
+                }
                 state.window.request_redraw();
             }
             _ => {}
