@@ -429,6 +429,26 @@ impl Renderer {
 
     pub fn render(&mut self, scene: &Scene, camera: &Camera) -> RenderStats {
         let frame_start = Instant::now();
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
+                return RenderStats::default();
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                return RenderStats::default();
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                if let Ok(surface) = self.instance.create_surface(self.window.clone()) {
+                    self.surface = surface;
+                    self.surface.configure(&self.device, &self.config);
+                }
+                return RenderStats::default();
+            }
+            wgpu::CurrentSurfaceTexture::Validation => return RenderStats::default(),
+        };
+
         let light_view_proj = directional_light_matrix(scene);
         let frame = FrameUniform::new(
             camera,
@@ -449,25 +469,6 @@ impl Renderer {
             );
         }
 
-        let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
-                return RenderStats::default();
-            }
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return RenderStats::default();
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                if let Ok(surface) = self.instance.create_surface(self.window.clone()) {
-                    self.surface = surface;
-                    self.surface.configure(&self.device, &self.config);
-                }
-                return RenderStats::default();
-            }
-            wgpu::CurrentSurfaceTexture::Validation => return RenderStats::default(),
-        };
         let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor {
