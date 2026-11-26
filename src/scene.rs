@@ -281,9 +281,9 @@ impl Scene {
             ground_material,
         );
         let mut ground_body = RigidBodySpec::fixed(PhysicsShape::Cuboid {
-            half_extents: Vec3::new(72.0, 0.08, 72.0),
+            half_extents: Vec3::new(36.0, 0.5, 36.0),
         });
-        ground_body.collider_offset = Vec3::new(0.0, -0.08, 0.0);
+        ground_body.collider_offset = Vec3::new(0.0, -0.5, 0.0);
         ground_body.friction = 0.94;
         ground_body.restitution = 0.04;
         ground.physics = Some(ground_body);
@@ -382,23 +382,23 @@ impl Scene {
         }
 
         for index in 0..44 {
-            let angle = index as f32 / 44.0 * std::f32::consts::TAU + hash01(index, 1) * 0.23;
-            let spawn_radius = 2.4 + hash01(index, 2) * 5.2;
+            let angle = index as f32 * 2.399_963_2;
+            let spawn_radius = 0.8 + ((index as f32 + 0.5) / 44.0).sqrt() * 6.6;
             let position = Vec3::new(
                 angle.cos() * spawn_radius,
-                5.0 + (index % 8) as f32 * 0.85 + hash01(index, 3) * 1.3,
+                2.8 + (index % 8) as f32 * 0.42 + hash01(index, 3) * 0.7,
                 angle.sin() * spawn_radius * 0.78 + 0.8,
             );
             let inward = Vec3::new(-angle.cos(), 0.0, -angle.sin());
             let tangent = Vec3::new(-angle.sin(), 0.0, angle.cos());
-            let linear_velocity = inward * (1.3 + hash01(index, 4) * 2.2)
-                + tangent * ((hash01(index, 5) - 0.5) * 3.0)
-                + Vec3::Y * (0.2 + hash01(index, 6) * 0.8);
+            let linear_velocity = inward * (0.45 + hash01(index, 4) * 0.85)
+                + tangent * ((hash01(index, 5) - 0.5) * 1.3)
+                + Vec3::Y * (-0.1 + hash01(index, 6) * 0.25);
             let angular_velocity = Vec3::new(
                 hash01(index, 7) - 0.5,
                 hash01(index, 8) - 0.5,
                 hash01(index, 9) - 0.5,
-            ) * 8.0;
+            ) * 3.0;
             let rotation = Vec3::new(
                 hash01(index, 10) * std::f32::consts::TAU,
                 hash01(index, 11) * std::f32::consts::TAU,
@@ -419,7 +419,7 @@ impl Scene {
                         linear_velocity,
                         angular_velocity,
                         0.72 + hash01(index, 16) * 0.22,
-                        0.08 + hash01(index, 17) * 0.15,
+                        0.02 + hash01(index, 17) * 0.08,
                     ),
                 )
             } else {
@@ -432,12 +432,11 @@ impl Scene {
                         linear_velocity,
                         angular_velocity,
                         0.55 + hash01(index, 19) * 0.34,
-                        0.28 + hash01(index, 20) * 0.45,
+                        0.14 + hash01(index, 20) * 0.22,
                     ),
                 )
             };
             body.density = 0.8 + hash01(index, 21) * 1.5;
-            body.respawn_interval = 9.0 + (index % 11) as f32 * 0.43 + hash01(index, 22) * 2.0;
             let material = if use_cube {
                 Material::new(
                     Vec3::new(
@@ -517,11 +516,25 @@ impl Scene {
             Vec3::new(0.0, 0.55, 0.0),
             Vec3::splat(8.0),
         );
-        if let Err(error) = scene.add_gltf_object(&model_path, asset_transform) {
-            log::warn!(
-                "failed to load bundled glTF asset {}: {error:#}",
-                model_path.display()
-            );
+        let bottle_start = scene.objects.len();
+        match scene.add_gltf_object(&model_path, asset_transform) {
+            Ok(created) => {
+                if created > 0 {
+                    let mut bottle_body = RigidBodySpec::fixed(PhysicsShape::Cylinder {
+                        half_height: 1.04,
+                        radius: 0.44,
+                    });
+                    bottle_body.friction = 0.64;
+                    bottle_body.restitution = 0.08;
+                    scene.objects[bottle_start].physics = Some(bottle_body);
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to load bundled glTF asset {}: {error:#}",
+                    model_path.display()
+                );
+            }
         }
         scene.physics = PhysicsWorld::new(&scene.objects);
         scene
@@ -621,6 +634,48 @@ mod tests {
                 .objects
                 .iter()
                 .all(|object| object.bounding_radius().is_finite())
+        );
+    }
+
+    #[test]
+    fn demo_dynamic_bodies_do_not_overlap_at_spawn() {
+        let scene = Scene::demo();
+        let dynamic_objects: Vec<&Object> = scene
+            .objects
+            .iter()
+            .filter(|object| object.has_dynamic_physics())
+            .collect();
+        for (index, object) in dynamic_objects.iter().enumerate() {
+            let object_radius = object.physics.as_ref().unwrap().shape.bounding_radius();
+            for other in &dynamic_objects[..index] {
+                let other_radius = other.physics.as_ref().unwrap().shape.bounding_radius();
+                let distance = object
+                    .transform
+                    .translation
+                    .distance(other.transform.translation);
+                assert!(
+                    distance > object_radius + other_radius + 0.03,
+                    "indices {index} overlap: distance={distance} radii={object_radius}+{other_radius}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn demo_physics_objects_settle_without_tunneling() {
+        let mut scene = Scene::demo();
+        for _ in 0..240 {
+            scene.physics.step(1.0 / 60.0, &mut scene.objects);
+        }
+        let minimum_center_height = scene
+            .objects
+            .iter()
+            .filter(|object| object.has_dynamic_physics())
+            .map(|object| object.transform.translation.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            minimum_center_height > 0.05,
+            "minimum_center_height={minimum_center_height}"
         );
     }
 

@@ -24,10 +24,31 @@ pub enum PhysicsShape {
     Cuboid {
         half_extents: Vec3,
     },
+    Cylinder {
+        half_height: f32,
+        radius: f32,
+    },
     TriMesh {
         vertices: Vec<Vec3>,
         indices: Vec<[u32; 3]>,
     },
+}
+
+impl PhysicsShape {
+    pub fn bounding_radius(&self) -> f32 {
+        match self {
+            Self::Ball { radius } => *radius,
+            Self::Cuboid { half_extents } => half_extents.length(),
+            Self::Cylinder {
+                half_height,
+                radius,
+            } => half_height.hypot(*radius),
+            Self::TriMesh { vertices, .. } => vertices
+                .iter()
+                .map(|vertex| vertex.length())
+                .fold(0.0, f32::max),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +80,7 @@ impl RigidBodySpec {
             angular_velocity: Vec3::ZERO,
             linear_damping: 0.015,
             angular_damping: 0.04,
-            ccd: false,
+            ccd: kind == RigidBodyKind::Dynamic,
             collider_offset: Vec3::ZERO,
             respawn_interval: 0.0,
         }
@@ -85,7 +106,6 @@ impl RigidBodySpec {
         body.angular_velocity = angular_velocity;
         body.friction = friction;
         body.restitution = restitution;
-        body.ccd = linear_velocity.length() > 3.0;
         body
     }
 
@@ -101,7 +121,6 @@ impl RigidBodySpec {
         body.angular_velocity = angular_velocity;
         body.friction = friction;
         body.restitution = restitution;
-        body.ccd = linear_velocity.length() > 3.0;
         body
     }
 }
@@ -208,6 +227,10 @@ impl PhysicsWorld {
                 PhysicsShape::Cuboid { half_extents } => {
                     ColliderBuilder::cuboid(half_extents.x, half_extents.y, half_extents.z)
                 }
+                PhysicsShape::Cylinder {
+                    half_height,
+                    radius,
+                } => ColliderBuilder::cylinder(*half_height, *radius),
                 PhysicsShape::TriMesh { vertices, indices } => {
                     let vertices: Vec<Vector> = vertices.iter().copied().map(rapier_vec).collect();
                     ColliderBuilder::trimesh(vertices, indices.clone())
@@ -417,6 +440,38 @@ mod tests {
         let difference =
             coarse_objects[1].transform.translation - fine_objects[1].transform.translation;
         assert!(difference.length() < 0.0001, "difference={difference:?}");
+    }
+
+    #[test]
+    fn falling_sphere_rests_on_cylinder_collider() {
+        let mut objects = physics_objects();
+        objects[0].physics = Some(RigidBodySpec::fixed(PhysicsShape::Cylinder {
+            half_height: 1.0,
+            radius: 0.35,
+        }));
+        objects[1].transform.translation.y = 4.0;
+        let mut world = PhysicsWorld::new(&objects);
+        for _ in 0..240 {
+            world.step(1.0 / 60.0, &mut objects);
+        }
+        let height = objects[1].transform.translation.y;
+        assert!(height > 1.4, "height={height}");
+    }
+
+    #[test]
+    fn fast_falling_sphere_does_not_tunnel_through_thin_ground() {
+        let mut objects = physics_objects();
+        objects[1].transform.translation.y = 50.0;
+        objects[1].transform.scale = Vec3::splat(0.1);
+        if let Some(physics) = objects[1].physics.as_mut() {
+            physics.shape = PhysicsShape::Ball { radius: 0.1 };
+        }
+        let mut world = PhysicsWorld::new(&objects);
+        for _ in 0..300 {
+            world.step(1.0 / 60.0, &mut objects);
+        }
+        let height = objects[1].transform.translation.y;
+        assert!(height > 0.05, "height={height}");
     }
 
     #[test]
