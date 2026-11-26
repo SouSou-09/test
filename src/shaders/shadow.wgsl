@@ -40,5 +40,7 @@ fn vs_shadow(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_shadow(input: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(input.depth, 0.0, 0.0, 1.0);
+    let slope = max(abs(dpdx(input.depth)), abs(dpdy(input.depth)));
+    let biased_depth = input.depth + slope * 1.75;
+    return vec4<f32>(biased_depth, 0.0, 0.0, 1.0);
 }
