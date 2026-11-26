@@ -89,10 +89,10 @@ fn visit_node(
     let world_transform = parent_transform * local_transform;
     if let Some(mesh) = node.mesh() {
         for primitive in mesh.primitives() {
-            if primitive.mode() == gltf::mesh::Mode::Triangles {
-                if let Some(asset_mesh) = convert_primitive(&primitive, world_transform, buffers)? {
-                    meshes.push(asset_mesh);
-                }
+            if primitive.mode() == gltf::mesh::Mode::Triangles
+                && let Some(asset_mesh) = convert_primitive(&primitive, world_transform, buffers)?
+            {
+                meshes.push(asset_mesh);
             }
         }
     }
@@ -185,7 +185,7 @@ fn convert_primitive(
 fn make_flat_shaded(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
     let mut flat_vertices = Vec::with_capacity(indices.len());
     let mut flat_indices = Vec::with_capacity(indices.len());
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             triangle[0] as usize,
             triangle[1] as usize,
@@ -212,7 +212,7 @@ fn make_flat_shaded(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>) {
 fn compute_tangents(vertices: &mut [Vertex], indices: &[u32], tangent_uv_set: u32) {
     let mut tangents = vec![Vec3::ZERO; vertices.len()];
     let mut bitangents = vec![Vec3::ZERO; vertices.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] = [
             triangle[0] as usize,
             triangle[1] as usize,
@@ -321,31 +321,31 @@ fn convert_texture(image: &gltf::image::Data) -> Result<AssetTexture> {
             }
         }
         gltf::image::Format::R8G8 => {
-            for pixel in image.pixels.chunks_exact(2) {
+            for pixel in image.pixels.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[1], 0, 255]);
             }
         }
         gltf::image::Format::R8G8B8 => {
-            for pixel in image.pixels.chunks_exact(3) {
+            for pixel in image.pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
             }
         }
         gltf::image::Format::R8G8B8A8 => rgba.extend_from_slice(&image.pixels),
         gltf::image::Format::R16 => {
-            for bytes in image.pixels.chunks_exact(2) {
+            for bytes in image.pixels.as_chunks::<2>().0 {
                 let value = u16::from_le_bytes([bytes[0], bytes[1]]) >> 8;
                 rgba.extend_from_slice(&[value as u8, value as u8, value as u8, 255]);
             }
         }
         gltf::image::Format::R16G16 => {
-            for bytes in image.pixels.chunks_exact(4) {
+            for bytes in image.pixels.as_chunks::<4>().0 {
                 let r = u16::from_le_bytes([bytes[0], bytes[1]]) >> 8;
                 let g = u16::from_le_bytes([bytes[2], bytes[3]]) >> 8;
                 rgba.extend_from_slice(&[r as u8, g as u8, 0, 255]);
             }
         }
         gltf::image::Format::R16G16B16 => {
-            for bytes in image.pixels.chunks_exact(6) {
+            for bytes in image.pixels.as_chunks::<6>().0 {
                 for channel in 0..3 {
                     rgba.push(
                         (u16::from_le_bytes([bytes[channel * 2], bytes[channel * 2 + 1]]) >> 8)
@@ -356,7 +356,7 @@ fn convert_texture(image: &gltf::image::Data) -> Result<AssetTexture> {
             }
         }
         gltf::image::Format::R16G16B16A16 => {
-            for bytes in image.pixels.chunks_exact(8) {
+            for bytes in image.pixels.as_chunks::<8>().0 {
                 for channel in 0..4 {
                     rgba.push(
                         (u16::from_le_bytes([bytes[channel * 2], bytes[channel * 2 + 1]]) >> 8)
@@ -366,7 +366,7 @@ fn convert_texture(image: &gltf::image::Data) -> Result<AssetTexture> {
             }
         }
         gltf::image::Format::R32G32B32FLOAT => {
-            for bytes in image.pixels.chunks_exact(12) {
+            for bytes in image.pixels.as_chunks::<12>().0 {
                 for channel in 0..3 {
                     rgba.push(float_to_u8(bytes, channel));
                 }
@@ -374,7 +374,7 @@ fn convert_texture(image: &gltf::image::Data) -> Result<AssetTexture> {
             }
         }
         gltf::image::Format::R32G32B32A32FLOAT => {
-            for bytes in image.pixels.chunks_exact(16) {
+            for bytes in image.pixels.as_chunks::<16>().0 {
                 for channel in 0..4 {
                     rgba.push(float_to_u8(bytes, channel));
                 }

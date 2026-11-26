@@ -4,7 +4,8 @@ use rayon::prelude::*;
 use crate::{
     assets::{self, AssetMesh, AssetTexture},
     camera::Frustum,
-    mesh::MeshKind,
+    mesh::{MeshData, MeshKind},
+    physics::{PhysicsShape, PhysicsWorld, RigidBodyKind, RigidBodySpec},
 };
 
 pub const MAX_POINT_LIGHTS: usize = 8;
@@ -142,6 +143,7 @@ pub struct Object {
     pub material: Material,
     pub spin: Option<Spin>,
     pub orbit: Option<Orbit>,
+    pub physics: Option<RigidBodySpec>,
 }
 
 impl Object {
@@ -154,6 +156,7 @@ impl Object {
             material,
             spin: None,
             orbit: None,
+            physics: None,
         }
     }
 
@@ -168,6 +171,12 @@ impl Object {
         mesh_radius * self.transform.scale.max_element()
     }
 
+    pub fn has_dynamic_physics(&self) -> bool {
+        self.physics
+            .as_ref()
+            .is_some_and(|physics| physics.kind == RigidBodyKind::Dynamic)
+    }
+
     fn update(&mut self, time: f32) {
         self.transform = self.base;
         if let Some(orbit) = self.orbit {
@@ -179,14 +188,48 @@ impl Object {
                     angle.sin() * orbit.radius,
                 );
         }
-        if let Some(spin) = self.spin {
-            if spin.axis.length_squared() > 0.000001 {
-                let spin_rotation =
-                    Quat::from_axis_angle(spin.axis.normalize(), time * spin.radians_per_second);
-                self.transform.rotation = spin_rotation * self.base.rotation;
-            }
+        if let Some(spin) = self.spin
+            && spin.axis.length_squared() > 0.000001
+        {
+            let spin_rotation =
+                Quat::from_axis_angle(spin.axis.normalize(), time * spin.radians_per_second);
+            self.transform.rotation = spin_rotation * self.base.rotation;
         }
     }
+}
+
+fn hash01(index: usize, salt: u32) -> f32 {
+    let mut value = (index as u32)
+        .wrapping_mul(747_796_405)
+        .wrapping_add(salt.wrapping_mul(2_891_233));
+    value ^= value >> 16;
+    value = value.wrapping_mul(2_246_822_519);
+    value ^= value >> 13;
+    (value % 1000) as f32 / 1000.0
+}
+
+fn fixed_trimesh(
+    mesh_data: &MeshData,
+    scale: Vec3,
+    friction: f32,
+    restitution: f32,
+) -> RigidBodySpec {
+    let vertices = mesh_data
+        .vertices
+        .iter()
+        .map(|vertex| Vec3::from_array(vertex.position) * scale)
+        .collect();
+    let indices = mesh_data
+        .indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+        .collect();
+    let mut body = RigidBodySpec::fixed(PhysicsShape::TriMesh { vertices, indices });
+    body.friction = friction;
+    body.restitution = restitution;
+    body
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -197,7 +240,7 @@ pub struct PointLight {
     pub intensity: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Scene {
     pub objects: Vec<Object>,
     pub asset_meshes: Vec<AssetMesh>,
@@ -209,6 +252,8 @@ pub struct Scene {
     /// Tangent of the sun's angular radius, used for contact-hardening shadows.
     pub sun_angular_size: f32,
     pub time: f32,
+    pub physics: PhysicsWorld,
+    pub last_physics_microseconds: u128,
 }
 
 fn demo_asset_path() -> std::path::PathBuf {
@@ -230,11 +275,19 @@ impl Scene {
         let mut ground_material = Material::new(Vec3::new(0.18, 0.20, 0.19), 0.0, 0.82);
         ground_material.detail_kind = 2.0;
         ground_material.detail_scale = 32.0;
-        objects.push(Object::new(
+        let mut ground = Object::new(
             MeshKind::Plane,
             Transform::new(Vec3::ZERO, Vec3::ZERO, Vec3::splat(72.0)),
             ground_material,
-        ));
+        );
+        let mut ground_body = RigidBodySpec::fixed(PhysicsShape::Cuboid {
+            half_extents: Vec3::new(72.0, 0.08, 72.0),
+        });
+        ground_body.collider_offset = Vec3::new(0.0, -0.08, 0.0);
+        ground_body.friction = 0.94;
+        ground_body.restitution = 0.04;
+        ground.physics = Some(ground_body);
+        objects.push(ground);
 
         for row in 0..7 {
             for column in 0..11 {
@@ -253,13 +306,17 @@ impl Scene {
                 );
                 let mut sphere = Object::new(
                     MeshKind::Sphere,
-                    Transform::new(Vec3::new(x, 1.0, z), Vec3::ZERO, Vec3::splat(0.48)),
+                    Transform::new(Vec3::new(x, 0.48, z), Vec3::ZERO, Vec3::splat(0.48)),
                     material,
                 );
                 sphere.spin = Some(Spin {
                     axis: Vec3::Y,
                     radians_per_second: 0.12,
                 });
+                let mut sphere_body = RigidBodySpec::fixed(PhysicsShape::Ball { radius: 0.48 });
+                sphere_body.friction = 0.86;
+                sphere_body.restitution = 0.12;
+                sphere.physics = Some(sphere_body);
                 objects.push(sphere);
             }
         }
@@ -290,17 +347,20 @@ impl Scene {
             let mut material = material;
             material.detail_kind = 1.0;
             material.detail_scale = height;
-            objects.push(Object::new(
+            let half_extents = Vec3::new(width, height * 0.5, width);
+            let mut building = Object::new(
                 MeshKind::Cube,
-                Transform::new(
-                    position,
-                    Vec3::new(0.0, -angle, 0.0),
-                    Vec3::new(width, height * 0.5, width),
-                ),
+                Transform::new(position, Vec3::new(0.0, -angle, 0.0), half_extents),
                 material,
-            ));
+            );
+            let mut building_body = RigidBodySpec::fixed(PhysicsShape::Cuboid { half_extents });
+            building_body.friction = 0.82;
+            building_body.restitution = 0.04;
+            building.physics = Some(building_body);
+            objects.push(building);
         }
 
+        let torus_mesh_data = MeshKind::Torus.generate();
         for index in 0..12 {
             let angle = index as f32 / 12.0 * std::f32::consts::TAU;
             let mut torus = Object::new(
@@ -312,11 +372,96 @@ impl Scene {
                 ),
                 Material::new(Vec3::new(0.72, 0.68, 0.58), 0.88, 0.2),
             );
-            torus.spin = Some(Spin {
-                axis: Vec3::new(0.3, 1.0, 0.1).normalize(),
-                radians_per_second: 0.35,
-            });
+            torus.physics = Some(fixed_trimesh(
+                &torus_mesh_data,
+                Vec3::splat(1.15),
+                0.48,
+                0.24,
+            ));
             objects.push(torus);
+        }
+
+        for index in 0..44 {
+            let angle = index as f32 / 44.0 * std::f32::consts::TAU + hash01(index, 1) * 0.23;
+            let spawn_radius = 2.4 + hash01(index, 2) * 5.2;
+            let position = Vec3::new(
+                angle.cos() * spawn_radius,
+                5.0 + (index % 8) as f32 * 0.85 + hash01(index, 3) * 1.3,
+                angle.sin() * spawn_radius * 0.78 + 0.8,
+            );
+            let inward = Vec3::new(-angle.cos(), 0.0, -angle.sin());
+            let tangent = Vec3::new(-angle.sin(), 0.0, angle.cos());
+            let linear_velocity = inward * (1.3 + hash01(index, 4) * 2.2)
+                + tangent * ((hash01(index, 5) - 0.5) * 3.0)
+                + Vec3::Y * (0.2 + hash01(index, 6) * 0.8);
+            let angular_velocity = Vec3::new(
+                hash01(index, 7) - 0.5,
+                hash01(index, 8) - 0.5,
+                hash01(index, 9) - 0.5,
+            ) * 8.0;
+            let rotation = Vec3::new(
+                hash01(index, 10) * std::f32::consts::TAU,
+                hash01(index, 11) * std::f32::consts::TAU,
+                hash01(index, 12) * std::f32::consts::TAU,
+            );
+            let use_cube = index % 3 == 0;
+            let (mesh, scale, mut body) = if use_cube {
+                let half_extents = Vec3::new(
+                    0.24 + hash01(index, 13) * 0.12,
+                    0.22 + hash01(index, 14) * 0.12,
+                    0.24 + hash01(index, 15) * 0.12,
+                );
+                (
+                    MeshKind::Cube,
+                    half_extents,
+                    RigidBodySpec::dynamic_cuboid(
+                        half_extents,
+                        linear_velocity,
+                        angular_velocity,
+                        0.72 + hash01(index, 16) * 0.22,
+                        0.08 + hash01(index, 17) * 0.15,
+                    ),
+                )
+            } else {
+                let radius = 0.25 + hash01(index, 18) * 0.16;
+                (
+                    MeshKind::Sphere,
+                    Vec3::splat(radius),
+                    RigidBodySpec::dynamic_ball(
+                        radius,
+                        linear_velocity,
+                        angular_velocity,
+                        0.55 + hash01(index, 19) * 0.34,
+                        0.28 + hash01(index, 20) * 0.45,
+                    ),
+                )
+            };
+            body.density = 0.8 + hash01(index, 21) * 1.5;
+            body.respawn_interval = 9.0 + (index % 11) as f32 * 0.43 + hash01(index, 22) * 2.0;
+            let material = if use_cube {
+                Material::new(
+                    Vec3::new(
+                        0.48 + hash01(index, 23) * 0.28,
+                        0.25 + hash01(index, 24) * 0.18,
+                        0.10 + hash01(index, 25) * 0.08,
+                    ),
+                    0.02,
+                    0.62 + hash01(index, 26) * 0.25,
+                )
+            } else {
+                Material::new(
+                    Vec3::new(
+                        0.12 + hash01(index, 27) * 0.28,
+                        0.34 + hash01(index, 28) * 0.38,
+                        0.48 + hash01(index, 29) * 0.46,
+                    ),
+                    0.08 + hash01(index, 30) * 0.38,
+                    0.24 + hash01(index, 31) * 0.42,
+                )
+            };
+            let mut object = Object::new(mesh, Transform::new(position, rotation, scale), material);
+            object.physics = Some(body);
+            objects.push(object);
         }
 
         let mut beacon = Object::new(
@@ -353,6 +498,7 @@ impl Scene {
             .collect();
 
         let mut scene = Self {
+            physics: PhysicsWorld::new(&[]),
             objects,
             asset_meshes: Vec::new(),
             asset_textures: Vec::new(),
@@ -362,6 +508,7 @@ impl Scene {
             sun_intensity: 3.2,
             sun_angular_size: 0.045,
             time: 0.0,
+            last_physics_microseconds: 0,
         };
 
         let model_path = demo_asset_path();
@@ -376,6 +523,7 @@ impl Scene {
                 model_path.display()
             );
         }
+        scene.physics = PhysicsWorld::new(&scene.objects);
         scene
     }
 
@@ -423,9 +571,14 @@ impl Scene {
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
         let time = self.time;
-        self.objects
-            .par_iter_mut()
-            .for_each(|object| object.update(time));
+        self.objects.par_iter_mut().for_each(|object| {
+            if !object.has_dynamic_physics() {
+                object.update(time);
+            }
+        });
+        let physics_start = std::time::Instant::now();
+        self.physics.step(dt, &mut self.objects);
+        self.last_physics_microseconds = physics_start.elapsed().as_micros();
         for (index, light) in self.point_lights.iter_mut().enumerate() {
             let angle =
                 self.time * 0.24 + index as f32 / MAX_POINT_LIGHTS as f32 * std::f32::consts::TAU;
@@ -462,6 +615,7 @@ mod tests {
         let scene = Scene::demo();
         assert!(scene.objects.len() > 1_300);
         assert!(scene.point_lights.len() == MAX_POINT_LIGHTS);
+        assert_eq!(scene.physics.dynamic_body_count(), 44);
         assert!(
             scene
                 .objects

@@ -4,7 +4,7 @@
 
 Rust製のリアルタイム物理ベース3Dエンジンです。`wgpu` / WGSL を使い、GPUインスタンシング・データ指向シーン更新・HDRポストプロセスを備えた拡張可能な基盤として実装しています。
 
-現在のサンドボックスは約1,300個以上のオブジェクトをメッシュ種別ごとのインスタンスバッチに整理し、PBRマテリアルグリッド、金属トーラス、プロシージャルな都市ジオメトリ、CC0のglTF WaterBottle実アセット、動的ポイントライトを描画します。
+現在のサンドボックスは約1,300個以上のオブジェクトをメッシュ種別ごとのインスタンスバッチに整理し、PBRマテリアルグリッド、金属トーラス、プロシージャルな都市ジオメトリ、CC0のglTF WaterBottle実アセット、動的ポイントライトに加え、重力・衝突・摩擦・反発で落下/散乱する44個の動的剛体を描画します。
 
 ## 実行
 
@@ -16,7 +16,7 @@ GPUドライバーとVulkan/Metal/DX12対応環境で実行してください。
 
 ## ベンチマーク
 
-ウィンドウタイトルにはfps、表示/カリング済みインスタンス数、scene/shadow draw call、三角形数、CPU submit/scene時間、GPUパス時間を表示します。GPU時間は`TIMESTAMP_QUERY`対応デバイスでshadow/scene/SSAO/bloom/compositeパスから取得します。
+ウィンドウタイトルにはfps、表示/カリング済みインスタンス数、scene/shadow draw call、三角形数、CPU submit/scene時間、physics時間、GPUパス時間を表示します。GPU時間は`TIMESTAMP_QUERY`対応デバイスでshadow/scene/SSAO/bloom/compositeパスから取得します。
 
 固定フレーム数のJSONベンチマークも実行できます。
 
@@ -27,7 +27,7 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 出力例:
 
 ```json
-{"benchmark":{"frames":5,"gpu_frames":5,"cpu_submit_ms_avg":193.5252,"cpu_scene_ms_avg":0.2390,"gpu_ms_avg":186.1782,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
+{"benchmark":{"frames":5,"gpu_frames":5,"cpu_submit_ms_avg":183.7560,"cpu_scene_ms_avg":1.9402,"cpu_physics_ms_avg":1.7788,"gpu_ms_avg":176.9758,"visible_instances":615,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":562352}}
 ```
 
 この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。`gpu_frames`が`frames`より少ない場合、非同期readbackが間に合わなかったフレームがあり、GPU平均は取得できたサンプルだけで計算されています。
@@ -66,13 +66,23 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 - tangent-space normal mapping（missing tangent時はUVから生成）
 - vignetteと少量のfilm grain
 
+### 物理シミュレーション
+
+- `rapier3d`による3D剛体シミュレーション
+- 地球重力、固定60Hzタイムステップ、最大5サブステップの蓄積式時間統合
+- 球・直方体・三角形メッシュコライダー（動的剛体と静的環境）
+- density由来の質量/慣性、摩擦、反発係数、線形/角減衰
+- 高速剛体のcontinuous collision detection、sleeping、BVH broadphase
+- 物理姿勢を描画transformへ毎フレーム同期
+- 物理更新時間をウィンドウタイトルとJSONベンチマークへ計測出力
+
 ### 高速化設計
 
 - Rust + `wgpu`による安全なGPU API利用
 - mesh kindごとのinstanced batching
 - 1フレーム1本の contiguous instance streamへ変換し、GPU側インスタンス属性として供給
 - camera frustum sphere culling
-- `rayon`によるデータ並列シーン更新
+- `rayon`によるデータ並列シーン更新と`rapier3d` parallel solver
 - release profileでthin LTO / single codegen unit
 - 動的メッシュ再生成を避け、プロシージャルメッシュはGPUリソースとして保持
 - glTF texture/mesh/material bind group cache
@@ -110,6 +120,10 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
    GPU-driven rendering、単一大容量ジオメトリバッファ、GPU cullingの方向性。現段階ではCPU frustum culling + instancingだが、最終的にはGPU-driven cullingへ移行する設計。  
    <https://www.realtimerendering.com/advances/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf>
 
+8. **Rapier physics engine documentation / Dimforge**
+   impulse solver、BVH broadphase、CCD、sleeping、材質係数を備えたリアルタイム剛体シミュレーション基盤。Photon3DではRapierを利用しつつ、固定タイムステップとシーン同期をエンジン側で実装している。
+   <https://rapier.rs/docs/>
+
 ## アーキテクチャ
 
 ```text
@@ -117,6 +131,7 @@ photon3d library
 ├─ camera.rs      camera math, view/projection, frustum planes
 ├─ assets.rs      glTF import, image conversion, normals/tangents, material metadata
 ├─ mesh.rs        procedural indexed meshes, normals/tangents, validation tests
+├─ physics.rs     Rapier rigid bodies, colliders, fixed timestep, CCD, respawn
 ├─ scene.rs       data-oriented objects, materials, lights, animation, culling input
 └─ renderer/
    ├─ mod.rs      wgpu device/surface, render passes, batching, resources
@@ -126,7 +141,7 @@ photon3d library
 描画パス:
 
 ```text
-scene update (parallel)
+scene update (parallel) + fixed-timestep rigid-body physics
   → frustum culling + mesh-kind instanced batching
   → directional shadow depth pass
   → PBR scene pass (HDR color + view normal + view depth MRT)
@@ -146,7 +161,7 @@ scene update (parallel)
 - cascaded shadow maps / moment shadow maps
 - TAA / temporal reprojection、AO denoise
 - prefiltered environment map / BRDF LUTによる本格的IBL
-- physics, ECS, asset hot reload
+- ECS、asset hot reload、joints/constraints、character controller
 - bindless texture array
 
 ## 検証

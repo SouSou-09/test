@@ -7,5 +7,6 @@
 pub mod assets;
 pub mod camera;
 pub mod mesh;
+pub mod physics;
 pub mod renderer;
 pub mod scene;
