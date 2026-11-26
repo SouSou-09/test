@@ -281,9 +281,9 @@ impl Scene {
             ground_material,
         );
         let mut ground_body = RigidBodySpec::fixed(PhysicsShape::Cuboid {
-            half_extents: Vec3::new(72.0, 0.08, 72.0),
+            half_extents: Vec3::new(36.0, 0.5, 36.0),
         });
-        ground_body.collider_offset = Vec3::new(0.0, -0.08, 0.0);
+        ground_body.collider_offset = Vec3::new(0.0, -0.5, 0.0);
         ground_body.friction = 0.94;
         ground_body.restitution = 0.04;
         ground.physics = Some(ground_body);
@@ -386,19 +386,19 @@ impl Scene {
             let spawn_radius = 2.4 + hash01(index, 2) * 5.2;
             let position = Vec3::new(
                 angle.cos() * spawn_radius,
-                5.0 + (index % 8) as f32 * 0.85 + hash01(index, 3) * 1.3,
+                2.8 + (index % 8) as f32 * 0.42 + hash01(index, 3) * 0.7,
                 angle.sin() * spawn_radius * 0.78 + 0.8,
             );
             let inward = Vec3::new(-angle.cos(), 0.0, -angle.sin());
             let tangent = Vec3::new(-angle.sin(), 0.0, angle.cos());
-            let linear_velocity = inward * (1.3 + hash01(index, 4) * 2.2)
-                + tangent * ((hash01(index, 5) - 0.5) * 3.0)
-                + Vec3::Y * (0.2 + hash01(index, 6) * 0.8);
+            let linear_velocity = inward * (0.45 + hash01(index, 4) * 0.85)
+                + tangent * ((hash01(index, 5) - 0.5) * 1.3)
+                + Vec3::Y * (-0.1 + hash01(index, 6) * 0.25);
             let angular_velocity = Vec3::new(
                 hash01(index, 7) - 0.5,
                 hash01(index, 8) - 0.5,
                 hash01(index, 9) - 0.5,
-            ) * 8.0;
+            ) * 3.0;
             let rotation = Vec3::new(
                 hash01(index, 10) * std::f32::consts::TAU,
                 hash01(index, 11) * std::f32::consts::TAU,
@@ -419,7 +419,7 @@ impl Scene {
                         linear_velocity,
                         angular_velocity,
                         0.72 + hash01(index, 16) * 0.22,
-                        0.08 + hash01(index, 17) * 0.15,
+                        0.02 + hash01(index, 17) * 0.08,
                     ),
                 )
             } else {
@@ -432,12 +432,11 @@ impl Scene {
                         linear_velocity,
                         angular_velocity,
                         0.55 + hash01(index, 19) * 0.34,
-                        0.28 + hash01(index, 20) * 0.45,
+                        0.14 + hash01(index, 20) * 0.22,
                     ),
                 )
             };
             body.density = 0.8 + hash01(index, 21) * 1.5;
-            body.respawn_interval = 9.0 + (index % 11) as f32 * 0.43 + hash01(index, 22) * 2.0;
             let material = if use_cube {
                 Material::new(
                     Vec3::new(
@@ -621,6 +620,24 @@ mod tests {
                 .objects
                 .iter()
                 .all(|object| object.bounding_radius().is_finite())
+        );
+    }
+
+    #[test]
+    fn demo_physics_objects_settle_without_tunneling() {
+        let mut scene = Scene::demo();
+        for _ in 0..240 {
+            scene.physics.step(1.0 / 60.0, &mut scene.objects);
+        }
+        let minimum_center_height = scene
+            .objects
+            .iter()
+            .filter(|object| object.has_dynamic_physics())
+            .map(|object| object.transform.translation.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            minimum_center_height > 0.05,
+            "minimum_center_height={minimum_center_height}"
         );
     }
 

@@ -59,7 +59,7 @@ impl RigidBodySpec {
             angular_velocity: Vec3::ZERO,
             linear_damping: 0.015,
             angular_damping: 0.04,
-            ccd: false,
+            ccd: kind == RigidBodyKind::Dynamic,
             collider_offset: Vec3::ZERO,
             respawn_interval: 0.0,
         }
@@ -85,7 +85,6 @@ impl RigidBodySpec {
         body.angular_velocity = angular_velocity;
         body.friction = friction;
         body.restitution = restitution;
-        body.ccd = linear_velocity.length() > 3.0;
         body
     }
 
@@ -101,7 +100,6 @@ impl RigidBodySpec {
         body.angular_velocity = angular_velocity;
         body.friction = friction;
         body.restitution = restitution;
-        body.ccd = linear_velocity.length() > 3.0;
         body
     }
 }
@@ -417,6 +415,22 @@ mod tests {
         let difference =
             coarse_objects[1].transform.translation - fine_objects[1].transform.translation;
         assert!(difference.length() < 0.0001, "difference={difference:?}");
+    }
+
+    #[test]
+    fn fast_falling_sphere_does_not_tunnel_through_thin_ground() {
+        let mut objects = physics_objects();
+        objects[1].transform.translation.y = 50.0;
+        objects[1].transform.scale = Vec3::splat(0.1);
+        if let Some(physics) = objects[1].physics.as_mut() {
+            physics.shape = PhysicsShape::Ball { radius: 0.1 };
+        }
+        let mut world = PhysicsWorld::new(&objects);
+        for _ in 0..300 {
+            world.step(1.0 / 60.0, &mut objects);
+        }
+        let height = objects[1].transform.translation.y;
+        assert!(height > 0.05, "height={height}");
     }
 
     #[test]
