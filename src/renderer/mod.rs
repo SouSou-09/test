@@ -21,8 +21,8 @@ const AMBIENT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-// PCSS needs raw depths, and GLSL cannot textureLoad depth textures; keep an R16Float copy.
-const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
+// PCSS needs raw depths, and GLSL cannot textureLoad depth textures; keep an R32Float copy.
+const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 const SHADOW_SIZE: u32 = 2048;
 const MAX_INSTANCES: usize = 4096;
 const GPU_TIMER_SLOTS: usize = 4;
@@ -1484,7 +1484,7 @@ fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
