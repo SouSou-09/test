@@ -23,6 +23,12 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 // PCSS needs raw depths, and GLSL cannot textureLoad depth textures; keep a full-precision R32Uint copy.
 const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+const SHADOW_DEPTH_CLEAR: wgpu::Color = wgpu::Color {
+    r: 4294967040.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
 const SHADOW_SIZE: u32 = 2048;
 const MAX_INSTANCES: usize = 4096;
 const GPU_TIMER_SLOTS: usize = 4;
@@ -915,7 +921,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    load: wgpu::LoadOp::Clear(SHADOW_DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 },
             })],
