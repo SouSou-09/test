@@ -17,9 +17,12 @@ use uniforms::{FrameUniform, InstanceUniform, PostUniform};
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const VIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const AMBIENT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+// PCSS needs raw depths, and GLSL cannot textureLoad depth textures; keep an R16Float copy.
+const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 const SHADOW_SIZE: u32 = 2048;
 const MAX_INSTANCES: usize = 4096;
 const GPU_TIMER_SLOTS: usize = 4;
@@ -65,8 +68,9 @@ pub struct Renderer {
     textures: RenderTextures,
     shadow_texture: wgpu::Texture,
     shadow_view: wgpu::TextureView,
+    shadow_color_texture: wgpu::Texture,
+    shadow_color_view: wgpu::TextureView,
     filter_sampler: wgpu::Sampler,
-    shadow_sampler: wgpu::Sampler,
 }
 
 pub struct GpuMesh {
@@ -95,6 +99,8 @@ struct RenderTextures {
     depth_view: wgpu::TextureView,
     view_depth: wgpu::Texture,
     view_depth_view: wgpu::TextureView,
+    ambient: wgpu::Texture,
+    ambient_view: wgpu::TextureView,
     ao: wgpu::Texture,
     ao_view: wgpu::TextureView,
     bloom_a: wgpu::Texture,
@@ -331,9 +337,8 @@ impl BindGroups {
         post_horizontal_buffer: &wgpu::Buffer,
         post_vertical_buffer: &wgpu::Buffer,
         textures: &RenderTextures,
-        shadow_view: &wgpu::TextureView,
+        shadow_color_view: &wgpu::TextureView,
         filter_sampler: &wgpu::Sampler,
-        shadow_sampler: &wgpu::Sampler,
     ) -> Self {
         let frame = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame bindings"),
@@ -345,11 +350,11 @@ impl BindGroups {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(shadow_view),
+                    resource: wgpu::BindingResource::TextureView(shadow_color_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    resource: wgpu::BindingResource::Sampler(filter_sampler),
                 },
             ],
         });
@@ -429,6 +434,10 @@ impl BindGroups {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(filter_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&textures.ambient_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -583,18 +592,6 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shadow comparison sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
-
         let shadow_texture = create_texture(
             &device,
             SHADOW_SIZE,
@@ -604,6 +601,15 @@ impl Renderer {
             "shadow map",
         );
         let shadow_view = shadow_texture.create_view(&Default::default());
+        let shadow_color_texture = create_texture(
+            &device,
+            SHADOW_SIZE,
+            SHADOW_SIZE,
+            SHADOW_COLOR_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shadow depth color",
+        );
+        let shadow_color_view = shadow_color_texture.create_view(&Default::default());
 
         let frame_bind_group_layout = create_frame_bind_group_layout(&device);
         let shadow_bind_group_layout = create_shadow_bind_group_layout(&device);
@@ -638,9 +644,8 @@ impl Renderer {
             &post_horizontal_buffer,
             &post_vertical_buffer,
             &textures,
-            &shadow_view,
+            &shadow_color_view,
             &filter_sampler,
-            &shadow_sampler,
         );
 
         let gpu_timer = GpuTimer::new(&device, &queue);
@@ -682,8 +687,9 @@ impl Renderer {
             textures,
             shadow_texture,
             shadow_view,
+            shadow_color_texture,
+            shadow_color_view,
             filter_sampler,
-            shadow_sampler,
         };
         Ok(renderer)
     }
@@ -927,16 +933,23 @@ impl Renderer {
             &self.post_horizontal_buffer,
             &self.post_vertical_buffer,
             &self.textures,
-            &self.shadow_view,
+            &self.shadow_color_view,
             &self.filter_sampler,
-            &self.shadow_sampler,
         );
     }
 
     fn shadow_pass(&self, encoder: &mut wgpu::CommandEncoder, batches: &[Batch]) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("directional shadow pass"),
-            color_attachments: &[],
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.shadow_color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.shadow_view,
                 depth_ops: Some(wgpu::Operations {
@@ -986,6 +999,15 @@ impl Renderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.textures.view_depth_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.textures.ambient_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1217,6 +1239,14 @@ impl RenderTextures {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             "view depth",
         );
+        let ambient = create_texture(
+            device,
+            width,
+            height,
+            AMBIENT_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "ambient lighting",
+        );
         let ao = create_texture(
             device,
             width,
@@ -1252,6 +1282,8 @@ impl RenderTextures {
             depth,
             view_depth_view: view_depth.create_view(&Default::default()),
             view_depth,
+            ambient_view: ambient.create_view(&Default::default()),
+            ambient,
             ao_view: ao.create_view(&Default::default()),
             ao,
             bloom_a_view: bloom_a.create_view(&Default::default()),
@@ -1483,7 +1515,7 @@ fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -1492,7 +1524,7 @@ fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
         ],
@@ -1588,6 +1620,7 @@ fn create_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
             texture(0),
             texture(1),
             texture(2),
+            texture(5),
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1694,6 +1727,11 @@ fn create_scene_pipeline(
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         }),
+        Some(wgpu::ColorTargetState {
+            format: AMBIENT_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
     ];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("cook-torrance scene pipeline"),
@@ -1771,7 +1809,16 @@ fn create_shadow_pipeline(
             },
         }),
         multisample: Default::default(),
-        fragment: None,
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_shadow"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SHADOW_COLOR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
         multiview_mask: None,
         cache: None,
     })

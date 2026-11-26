@@ -68,7 +68,7 @@ impl FrameUniform {
                 width as f32,
                 height as f32,
                 scene.point_lights.len().min(MAX_POINT_LIGHTS) as f32,
-                0.0,
+                scene.sun_angular_size,
             ],
             point_light_positions,
             point_light_colors,

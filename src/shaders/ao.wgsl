@@ -59,9 +59,9 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let position = view_position_from_depth(input.uv, depth);
-    let radius = 0.42;
+    let radius = 0.5;
     let bias = 0.025;
-    let noise = hash12(input.position.xy + vec2<f32>(frame.camera_position_time.w, -frame.camera_position_time.w));
+    let noise = hash12(input.position.xy);
 
     var tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), normal));
     if length(tangent) < 0.05 {
@@ -96,6 +96,6 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
         weight += range_weight;
     }
 
-    let occlusion_factor = clamp(1.0 - occlusion / max(weight, 1.0) * 0.9, 0.0, 1.0);
+    let occlusion_factor = clamp(1.0 - occlusion / max(weight, 0.0001) * 0.82, 0.0, 1.0);
     return vec4<f32>(occlusion_factor, occlusion_factor, occlusion_factor, 1.0);
 }

@@ -206,6 +206,8 @@ pub struct Scene {
     pub sun_direction: Vec3,
     pub sun_color: Vec3,
     pub sun_intensity: f32,
+    /// Tangent of the sun's angular radius, used for contact-hardening shadows.
+    pub sun_angular_size: f32,
     pub time: f32,
 }
 
@@ -358,6 +360,7 @@ impl Scene {
             sun_direction: Vec3::new(-0.42, -0.78, -0.46).normalize(),
             sun_color: Vec3::new(1.0, 0.86, 0.68),
             sun_intensity: 3.2,
+            sun_angular_size: 0.045,
             time: 0.0,
         };
 
