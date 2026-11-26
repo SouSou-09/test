@@ -59,9 +59,9 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let position = view_position_from_depth(input.uv, depth);
-    let radius = 0.42;
+    let radius = 0.5;
     let bias = 0.025;
-    let noise = hash12(input.position.xy + vec2<f32>(frame.camera_position_time.w, -frame.camera_position_time.w));
+    let noise = hash12(input.position.xy);
 
     var tangent = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), normal));
     if length(tangent) < 0.05 {
@@ -88,6 +88,9 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         let sample_pixel = vec2<i32>(sample_uv * frame.screen_params.xy);
         let sample_depth = textureLoad(view_depth_texture, sample_pixel, 0).r;
+        if sample_depth <= 0.0001 {
+            continue;
+        }
         let scene_position = view_position_from_depth(sample_uv, sample_depth);
         let range_weight = 1.0 - smoothstep(radius * 0.5, radius, abs(scene_position.z - position.z));
         if scene_position.z > sample_position.z + bias {
@@ -96,6 +99,6 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
         weight += range_weight;
     }
 
-    let occlusion_factor = clamp(1.0 - occlusion / max(weight, 1.0) * 0.9, 0.0, 1.0);
+    let occlusion_factor = clamp(1.0 - occlusion / max(weight, 0.0001) * 0.82, 0.0, 1.0);
     return vec4<f32>(occlusion_factor, occlusion_factor, occlusion_factor, 1.0);
 }

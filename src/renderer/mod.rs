@@ -17,9 +17,18 @@ use uniforms::{FrameUniform, InstanceUniform, PostUniform};
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const VIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const AMBIENT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const AO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+// PCSS needs raw depths, and GLSL cannot textureLoad depth textures; keep a full-precision R32Uint copy.
+const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+const SHADOW_DEPTH_CLEAR: wgpu::Color = wgpu::Color {
+    r: 4294967040.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
 const SHADOW_SIZE: u32 = 2048;
 const MAX_INSTANCES: usize = 4096;
 const GPU_TIMER_SLOTS: usize = 4;
@@ -65,8 +74,9 @@ pub struct Renderer {
     textures: RenderTextures,
     shadow_texture: wgpu::Texture,
     shadow_view: wgpu::TextureView,
+    shadow_color_texture: wgpu::Texture,
+    shadow_color_view: wgpu::TextureView,
     filter_sampler: wgpu::Sampler,
-    shadow_sampler: wgpu::Sampler,
 }
 
 pub struct GpuMesh {
@@ -95,6 +105,8 @@ struct RenderTextures {
     depth_view: wgpu::TextureView,
     view_depth: wgpu::Texture,
     view_depth_view: wgpu::TextureView,
+    ambient: wgpu::Texture,
+    ambient_view: wgpu::TextureView,
     ao: wgpu::Texture,
     ao_view: wgpu::TextureView,
     bloom_a: wgpu::Texture,
@@ -127,7 +139,6 @@ struct GpuTimer {
     slot: usize,
     pending: [bool; GPU_TIMER_SLOTS],
     slot_frame_indices: [u64; GPU_TIMER_SLOTS],
-    slot_submission_indices: [Option<wgpu::SubmissionIndex>; GPU_TIMER_SLOTS],
     map_receivers:
         [Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>; GPU_TIMER_SLOTS],
     active: bool,
@@ -171,7 +182,6 @@ impl GpuTimer {
             slot: 0,
             pending: [false; GPU_TIMER_SLOTS],
             slot_frame_indices: [0; GPU_TIMER_SLOTS],
-            slot_submission_indices: std::array::from_fn(|_| None),
             map_receivers: std::array::from_fn(|_| None),
             active: true,
             last_frame_index: None,
@@ -204,12 +214,7 @@ impl GpuTimer {
         }
     }
 
-    fn finish_frame(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        frame_index: u64,
-    ) -> Option<usize> {
-        let written_slot = self.active.then_some(self.slot);
+    fn finish_frame(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.active {
             let first = self.slot as u32 * GPU_TIMER_QUERIES_PER_FRAME;
             encoder.resolve_query_set(
@@ -229,11 +234,6 @@ impl GpuTimer {
             self.slot_frame_indices[self.slot] = frame_index;
         }
         self.slot = (self.slot + 1) % GPU_TIMER_SLOTS;
-        written_slot
-    }
-
-    fn mark_submitted(&mut self, slot: usize, submission_index: wgpu::SubmissionIndex) {
-        self.slot_submission_indices[slot] = Some(submission_index);
     }
 
     fn read_slot(&mut self, device: &wgpu::Device) -> bool {
@@ -248,20 +248,9 @@ impl GpuTimer {
             self.map_receivers[self.slot] = Some(receiver);
         }
         let _ = device.poll(wgpu::PollType::Poll);
-        let mut result = self.map_receivers[self.slot]
+        let result = self.map_receivers[self.slot]
             .as_ref()
             .map(|receiver| receiver.try_recv());
-        if matches!(result, Some(Err(std::sync::mpsc::TryRecvError::Empty))) {
-            if let Some(submission_index) = self.slot_submission_indices[self.slot].clone() {
-                let _ = device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(submission_index),
-                    timeout: None,
-                });
-                result = self.map_receivers[self.slot]
-                    .as_ref()
-                    .map(|receiver| receiver.try_recv());
-            }
-        }
         let Some(result) = result else {
             return true;
         };
@@ -331,9 +320,8 @@ impl BindGroups {
         post_horizontal_buffer: &wgpu::Buffer,
         post_vertical_buffer: &wgpu::Buffer,
         textures: &RenderTextures,
-        shadow_view: &wgpu::TextureView,
+        shadow_color_view: &wgpu::TextureView,
         filter_sampler: &wgpu::Sampler,
-        shadow_sampler: &wgpu::Sampler,
     ) -> Self {
         let frame = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame bindings"),
@@ -345,11 +333,7 @@ impl BindGroups {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(shadow_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                    resource: wgpu::BindingResource::TextureView(shadow_color_view),
                 },
             ],
         });
@@ -429,6 +413,10 @@ impl BindGroups {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(filter_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&textures.ambient_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -583,18 +571,6 @@ impl Renderer {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("shadow comparison sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            compare: Some(wgpu::CompareFunction::LessEqual),
-            ..Default::default()
-        });
-
         let shadow_texture = create_texture(
             &device,
             SHADOW_SIZE,
@@ -604,6 +580,15 @@ impl Renderer {
             "shadow map",
         );
         let shadow_view = shadow_texture.create_view(&Default::default());
+        let shadow_color_texture = create_texture(
+            &device,
+            SHADOW_SIZE,
+            SHADOW_SIZE,
+            SHADOW_COLOR_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shadow depth color",
+        );
+        let shadow_color_view = shadow_color_texture.create_view(&Default::default());
 
         let frame_bind_group_layout = create_frame_bind_group_layout(&device);
         let shadow_bind_group_layout = create_shadow_bind_group_layout(&device);
@@ -638,9 +623,8 @@ impl Renderer {
             &post_horizontal_buffer,
             &post_vertical_buffer,
             &textures,
-            &shadow_view,
+            &shadow_color_view,
             &filter_sampler,
-            &shadow_sampler,
         );
 
         let gpu_timer = GpuTimer::new(&device, &queue);
@@ -682,8 +666,9 @@ impl Renderer {
             textures,
             shadow_texture,
             shadow_view,
+            shadow_color_texture,
+            shadow_color_view,
             filter_sampler,
-            shadow_sampler,
         };
         Ok(renderer)
     }
@@ -859,15 +844,11 @@ impl Renderer {
         self.ao_pass(&mut encoder);
         self.bloom_passes(&mut encoder);
         self.composite_pass(&mut encoder, &surface_view);
-        let gpu_timer_slot = self
-            .gpu_timer
-            .as_mut()
-            .and_then(|timer| timer.finish_frame(&mut encoder, frame_index));
-
-        let submission_index = self.queue.submit([encoder.finish()]);
-        if let (Some(timer), Some(slot)) = (self.gpu_timer.as_mut(), gpu_timer_slot) {
-            timer.mark_submitted(slot, submission_index);
+        if let Some(timer) = self.gpu_timer.as_mut() {
+            timer.finish_frame(&mut encoder, frame_index);
         }
+
+        self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(surface_texture);
 
@@ -927,16 +908,23 @@ impl Renderer {
             &self.post_horizontal_buffer,
             &self.post_vertical_buffer,
             &self.textures,
-            &self.shadow_view,
+            &self.shadow_color_view,
             &self.filter_sampler,
-            &self.shadow_sampler,
         );
     }
 
     fn shadow_pass(&self, encoder: &mut wgpu::CommandEncoder, batches: &[Batch]) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("directional shadow pass"),
-            color_attachments: &[],
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.shadow_color_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(SHADOW_DEPTH_CLEAR),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.shadow_view,
                 depth_ops: Some(wgpu::Operations {
@@ -986,6 +974,15 @@ impl Renderer {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.textures.view_depth_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.textures.ambient_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1217,6 +1214,14 @@ impl RenderTextures {
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             "view depth",
         );
+        let ambient = create_texture(
+            device,
+            width,
+            height,
+            AMBIENT_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "ambient lighting",
+        );
         let ao = create_texture(
             device,
             width,
@@ -1252,6 +1257,8 @@ impl RenderTextures {
             depth,
             view_depth_view: view_depth.create_view(&Default::default()),
             view_depth,
+            ambient_view: ambient.create_view(&Default::default()),
+            ambient,
             ao_view: ao.create_view(&Default::default()),
             ao,
             bloom_a_view: bloom_a.create_view(&Default::default()),
@@ -1483,16 +1490,10 @@ fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
                 binding: 1,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Depth,
+                    sample_type: wgpu::TextureSampleType::Uint,
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                 count: None,
             },
         ],
@@ -1588,6 +1589,7 @@ fn create_composite_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
             texture(0),
             texture(1),
             texture(2),
+            texture(5),
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1694,6 +1696,11 @@ fn create_scene_pipeline(
             blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         }),
+        Some(wgpu::ColorTargetState {
+            format: AMBIENT_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        }),
     ];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("cook-torrance scene pipeline"),
@@ -1771,7 +1778,16 @@ fn create_shadow_pipeline(
             },
         }),
         multisample: Default::default(),
-        fragment: None,
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_shadow"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SHADOW_COLOR_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
         multiview_mask: None,
         cache: None,
     })

@@ -27,6 +27,7 @@ struct PostUniform {
 @group(0) @binding(2) var bloom_texture: texture_2d<f32>;
 @group(0) @binding(3) var composite_sampler: sampler;
 @group(0) @binding(4) var<uniform> frame: FrameUniform;
+@group(0) @binding(5) var ambient_texture: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -114,7 +115,10 @@ fn fs_composite(input: VertexOutput) -> @location(0) vec4<f32> {
     let ray = normalize(world.xyz / max(world.w, 0.0001) - frame.camera_position_time.xyz);
     let sky = sky_color(ray, frame);
 
-    var color = mix(sky, hdr.rgb * ao, hdr.a);
+    let ambient = textureSample(ambient_texture, composite_sampler, input.uv).rgb;
+    let direct_lighting = max(hdr.rgb - ambient, vec3<f32>(0.0));
+    let shaded = direct_lighting + ambient * ao;
+    var color = mix(sky, shaded, hdr.a);
     color += bloom * 0.48;
     color *= 1.05;
 

@@ -27,10 +27,10 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 出力例:
 
 ```json
-{"benchmark":{"frames":5,"cpu_submit_ms_avg":126.5758,"cpu_scene_ms_avg":0.0836,"gpu_ms_avg":121.4311,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
+{"benchmark":{"frames":5,"gpu_frames":5,"cpu_submit_ms_avg":193.5252,"cpu_scene_ms_avg":0.2390,"gpu_ms_avg":186.1782,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
 ```
 
-この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。
+この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。`gpu_frames`が`frames`より少ない場合、非同期readbackが間に合わなかったフレームがあり、GPU平均は取得できたサンプルだけで計算されています。
 
 ## 操作
 
@@ -53,11 +53,11 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
   - Schlick Fresnel
   - metallic / roughnessワークフロー
 - HDR linear lighting（`Rgba16Float`）
-- directional lightの2048² shadow map + 3x3 PCF
+- directional lightの2048² shadow map + blocker search付きPCSS風contact-hardening shadow（16-tap Poisson PCF）
 - 8つの動的ポイントライト（逆二乗減衰 + 半径フォールオフ）
-- 視空間法線・視深バッファを使ったスクリーンスペースAO
+- 視空間法線・視深バッファを使った安定化スクリーンスペースAO（ambient lightingのみへ適用）
 - threshold + soft kneeによる高輝度抽出、分離Gaussian bloom
-- 手続き sky gradient / sun disk
+- 手続き sky gradient / sun diskとroughness応答つき環境specular照明
 - Narkowicz近似のACES filmic tone mapping
 - プロシージャル建築コンクリート / 窓 / 地表ミネラル detail
 - glTF 2.0 mesh/node transform loading
@@ -99,7 +99,7 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
    <https://artis.inrialpes.fr/Membres/Olivier.Hoel/ssao/nVidiaHSAO/ScreenSpaceAO.pdf>
 
 5. **Reeves, Salesin, Cook, “Rendering Antialiased Shadows with Depth Maps” (1987) / Fernando, “Percentage-Closer Soft Shadows” (2005)**  
-   shadow mapとPCF filteringの根拠。現在は固定3x3 PCFで、PCSSは今後の拡張。  
+   shadow mapとPCF filtering、受光面・遮蔽物距離に応じたpenumbra近似の根拠。現在は単一cascadeのPCSS風近似。\
    <https://developer.download.nvidia.com/shaderlibrary/docs/shadow_PCSS.pdf>
 
 6. **Narkowicz, “ACES Filmic Tone Mapping Curve” (2016)**  
@@ -143,9 +143,9 @@ scene update (parallel)
 - glTF alpha blending/masking、skinning、morph targets、texture transform
 - clustered forward+ light assignment
 - GPU compute frustum/occlusion culling と indirect draw
-- PCSS / cascaded shadow maps
+- cascaded shadow maps / moment shadow maps
 - TAA / temporal reprojection、AO denoise
-- image-based lighting（prefiltered environment map / BRDF LUT）
+- prefiltered environment map / BRDF LUTによる本格的IBL
 - physics, ECS, asset hot reload
 - bindless texture array
 

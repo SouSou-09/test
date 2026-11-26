@@ -14,8 +14,7 @@ struct FrameUniform {
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
-@group(0) @binding(1) var shadow_map: texture_depth_2d;
-@group(0) @binding(2) var shadow_sampler: sampler_comparison;
+@group(0) @binding(1) var shadow_map: texture_2d<u32>;
 
 @group(1) @binding(0) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(1) var normal_texture: texture_2d<f32>;
@@ -138,6 +137,64 @@ fn cook_torrance(
     return (diffuse + specular) * radiance * normal_dot_light;
 }
 
+const SHADOW_MAP_SIZE: f32 = 2048.0;
+const SHADOW_ORTHO_WIDTH: f32 = 76.0;
+const SHADOW_NEAR: f32 = 0.1;
+const SHADOW_FAR: f32 = 110.0;
+const PCSS_POISSON_COUNT: u32 = 16u;
+const PCSS_BLOCKER_COUNT: u32 = 8u;
+// 0xffffff00: the largest u32-scaled depth exactly representable as f32.
+const SHADOW_DEPTH_SCALE: f32 = 4294967040.0;
+
+var<private> PCSS_POISSON: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>(0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870),
+    vec2<f32>(0.34495938, 0.29387760),
+    vec2<f32>(-0.91588581, 0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543, 0.27676845),
+    vec2<f32>(0.97484398, 0.75648379),
+    vec2<f32>(0.44323325, -0.97511554),
+    vec2<f32>(0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>(0.79197514, 0.19090188),
+    vec2<f32>(-0.24188840, 0.99706507),
+    vec2<f32>(-0.81409955, 0.91437590),
+    vec2<f32>(0.19984126, 0.78641367),
+    vec2<f32>(0.14383161, -0.14100790),
+);
+
+fn shadow_linear_depth(depth: f32) -> f32 {
+    return SHADOW_NEAR + depth * (SHADOW_FAR - SHADOW_NEAR);
+}
+
+fn shadow_map_depth(uv: vec2<f32>) -> f32 {
+    let texel = clamp(
+        vec2<i32>(uv * SHADOW_MAP_SIZE),
+        vec2<i32>(0, 0),
+        vec2<i32>(i32(SHADOW_MAP_SIZE) - 1, i32(SHADOW_MAP_SIZE) - 1),
+    );
+    return f32(textureLoad(shadow_map, texel, 0).r) / SHADOW_DEPTH_SCALE;
+}
+
+fn average_blocker_depth(uv: vec2<f32>, receiver_depth: f32, bias: f32) -> f32 {
+    var blocker_depth = 0.0;
+    var blocker_count = 0.0;
+    let search_radius = 13.0 / SHADOW_MAP_SIZE;
+    for (var index = 0u; index < PCSS_BLOCKER_COUNT; index = index + 1u) {
+        let depth = shadow_map_depth(uv + PCSS_POISSON[index] * search_radius);
+        if depth + bias < receiver_depth {
+            blocker_depth += depth;
+            blocker_count += 1.0;
+        }
+    }
+    if blocker_count < 0.5 {
+        return -1.0;
+    }
+    return blocker_depth / blocker_count;
+}
+
 fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
     let light_space = frame.light_view_proj * vec4<f32>(world_position, 1.0);
     let projected = light_space.xyz / max(light_space.w, 0.0001);
@@ -147,27 +204,47 @@ fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
     }
 
     let normal_dot_light = max(dot(normal, -frame.sun_direction_intensity.xyz), 0.0);
-    let bias = max(0.0018 * (1.0 - normal_dot_light), 0.00045);
-    let texel = 1.0 / 2048.0;
-    var visibility = 0.0;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            visibility += textureSampleCompare(
-                shadow_map,
-                shadow_sampler,
-                uv + vec2<f32>(f32(x) * texel, f32(y) * texel),
-                projected.z - bias,
-            );
-        }
+    let bias = max(0.0024 * (1.0 - normal_dot_light), 0.00035);
+    let receiver_world_depth = shadow_linear_depth(projected.z);
+    let blocker_depth = average_blocker_depth(uv, projected.z, bias);
+    if blocker_depth < 0.0 {
+        return 1.0;
     }
-    return visibility / 9.0;
+    let blocker_world_depth = shadow_linear_depth(blocker_depth);
+    let penumbra = max(receiver_world_depth - blocker_world_depth, 0.0)
+        * max(frame.screen_params.w, 0.001);
+    let filter_radius = clamp(
+        penumbra / SHADOW_ORTHO_WIDTH * SHADOW_MAP_SIZE,
+        1.25,
+        13.0,
+    );
+
+    var visibility = 0.0;
+    let texel_radius = filter_radius / SHADOW_MAP_SIZE;
+    for (var index = 0u; index < PCSS_POISSON_COUNT; index = index + 1u) {
+        let sample_uv = uv + PCSS_POISSON[index] * texel_radius;
+        let map_depth = shadow_map_depth(sample_uv);
+        visibility += select(0.0, 1.0, map_depth + bias >= projected.z);
+    }
+    return visibility / f32(PCSS_POISSON_COUNT);
 }
 
 fn sky_ambient(direction: vec3<f32>) -> vec3<f32> {
     let height = clamp(direction.y * 0.5 + 0.5, 0.0, 1.0);
     let horizon = vec3<f32>(0.34, 0.25, 0.19);
     let zenith = vec3<f32>(0.08, 0.20, 0.42);
-    return mix(horizon, zenith, pow(height, 0.7));
+    let sky = mix(horizon, zenith, pow(height, 0.7));
+    let ground = vec3<f32>(0.12, 0.095, 0.07);
+    return mix(ground, sky, smoothstep(-0.18, 0.16, direction.y));
+}
+
+fn environment_radiance(direction: vec3<f32>, roughness: f32, sun_visibility: f32) -> vec3<f32> {
+    var radiance = sky_ambient(direction);
+    let sun_amount = max(dot(direction, -frame.sun_direction_intensity.xyz), 0.0);
+    let sharpness = pow(1.0 - roughness, 2.0);
+    let forward_scatter = pow(sun_amount, mix(3.0, 18.0, sharpness)) * mix(0.035, 0.2, sharpness);
+    radiance += frame.sun_color.rgb * forward_scatter * sun_visibility;
+    return radiance;
 }
 
 fn hash21(seed: vec2<f32>) -> f32 {
@@ -193,6 +270,7 @@ struct FragmentOutput {
     @location(0) hdr_color: vec4<f32>,
     @location(1) normal_material: vec4<f32>,
     @location(2) view_depth: vec4<f32>,
+    @location(3) ambient_color: vec4<f32>,
 };
 
 @fragment
@@ -294,14 +372,20 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
     }
 
     let reflection = reflect(-view_dir, normal);
+    let rough_reflection = normalize(mix(reflection, normal, roughness * roughness));
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
-    let fresnel = fresnel_schlick(max(dot(normal, view_dir), 0.0), f0);
-    let diffuse_ambient = sky_ambient(normal) * albedo * (1.0 - metallic) * 0.34;
-    let specular_ambient = sky_ambient(reflection) * fresnel * pow(1.0 - roughness, 1.7) * 0.72;
-    color += (diffuse_ambient + specular_ambient) * occlusion + emissive;
+    let normal_dot_view = max(dot(normal, view_dir), 0.0);
+    let env_fresnel = f0
+        + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(1.0 - normal_dot_view, 5.0);
+    let diffuse_ambient = sky_ambient(normal) * albedo * (1.0 - metallic) * 0.42;
+    let specular_ambient = environment_radiance(rough_reflection, roughness, sun_visibility)
+        * env_fresnel * (1.0 - roughness * 0.62) * 0.86;
+    let ambient = (diffuse_ambient + specular_ambient) * occlusion;
+    color += ambient + emissive;
 
     var output: FragmentOutput;
     output.hdr_color = vec4<f32>(color, 1.0);
+    output.ambient_color = vec4<f32>(ambient, 1.0);
     let shading_view_normal = normalize((frame.view * vec4<f32>(normal, 0.0)).xyz);
     output.normal_material = vec4<f32>(shading_view_normal * 0.5 + vec3<f32>(0.5), roughness);
     output.view_depth = vec4<f32>(input.view_depth, 0.0, 0.0, 1.0);
