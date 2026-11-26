@@ -180,7 +180,7 @@ fn shadow_map_depth(uv: vec2<f32>) -> f32 {
 fn average_blocker_depth(uv: vec2<f32>, receiver_depth: f32, bias: f32) -> f32 {
     var blocker_depth = 0.0;
     var blocker_count = 0.0;
-    let search_radius = 4.0 / SHADOW_MAP_SIZE;
+    let search_radius = 13.0 / SHADOW_MAP_SIZE;
     for (var index = 0u; index < PCSS_BLOCKER_COUNT; index = index + 1u) {
         let depth = shadow_map_depth(uv + PCSS_POISSON[index] * search_radius);
         if depth + bias < receiver_depth {
