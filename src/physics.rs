@@ -242,7 +242,6 @@ impl PhysicsWorld {
     pub fn step(&mut self, frame_dt: f32, objects: &mut [Object]) {
         self.accumulator = (self.accumulator + frame_dt.max(0.0)).min(0.12);
         let mut substeps = 0;
-        let mut simulated_dt = 0.0;
         while self.accumulator >= FIXED_TIMESTEP && substeps < MAX_SUBSTEPS {
             self.pipeline.step(
                 self.gravity,
@@ -260,11 +259,8 @@ impl PhysicsWorld {
                 &(),
             );
             self.accumulator -= FIXED_TIMESTEP;
-            simulated_dt += FIXED_TIMESTEP;
             substeps += 1;
-        }
-        if simulated_dt > 0.0 {
-            self.update_respawns(simulated_dt);
+            self.update_respawns(FIXED_TIMESTEP);
         }
         self.sync_objects(objects);
     }
@@ -394,6 +390,32 @@ mod tests {
         }
         let difference =
             low_fps_objects[1].transform.translation - fixed_objects[1].transform.translation;
+        assert!(difference.length() < 0.0001, "difference={difference:?}");
+    }
+
+    #[test]
+    fn respawn_timing_is_independent_of_render_frame_grouping() {
+        fn respawning_objects() -> Vec<Object> {
+            let mut objects = physics_objects();
+            if let Some(physics) = objects[1].physics.as_mut() {
+                physics.linear_velocity = Vec3::X;
+                physics.respawn_interval = 29.0 / 60.0;
+            }
+            objects
+        }
+
+        let mut coarse_objects = respawning_objects();
+        let mut fine_objects = respawning_objects();
+        let mut coarse = PhysicsWorld::new(&coarse_objects);
+        let mut fine = PhysicsWorld::new(&fine_objects);
+        for _ in 0..30 {
+            coarse.step(1.0 / 30.0, &mut coarse_objects);
+        }
+        for _ in 0..60 {
+            fine.step(1.0 / 60.0, &mut fine_objects);
+        }
+        let difference =
+            coarse_objects[1].transform.translation - fine_objects[1].transform.translation;
         assert!(difference.length() < 0.0001, "difference={difference:?}");
     }
 
