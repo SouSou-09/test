@@ -15,6 +15,9 @@ struct FrameUniform {
 
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 
+// 0xffffff00: the largest u32-scaled depth exactly representable as f32.
+const SHADOW_DEPTH_SCALE: f32 = 4294967040.0;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(4) model0: vec4<f32>,
@@ -39,8 +42,9 @@ fn vs_shadow(input: VertexInput) -> VertexOutput {
 }
 
 @fragment
-fn fs_shadow(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_shadow(input: VertexOutput) -> @location(0) vec4<u32> {
     let slope = max(abs(dpdx(input.depth)), abs(dpdy(input.depth)));
-    let biased_depth = input.depth + slope * 1.75;
-    return vec4<f32>(biased_depth, 0.0, 0.0, 1.0);
+    let biased_depth = clamp(input.depth + slope * 1.75, 0.0, 1.0);
+    let encoded_depth = u32(biased_depth * SHADOW_DEPTH_SCALE);
+    return vec4<u32>(encoded_depth, 0u, 0u, 1u);
 }

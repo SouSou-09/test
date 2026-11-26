@@ -14,7 +14,7 @@ struct FrameUniform {
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
-@group(0) @binding(1) var shadow_map: texture_2d<f32>;
+@group(0) @binding(1) var shadow_map: texture_2d<u32>;
 
 @group(1) @binding(0) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(1) var normal_texture: texture_2d<f32>;
@@ -143,6 +143,8 @@ const SHADOW_NEAR: f32 = 0.1;
 const SHADOW_FAR: f32 = 110.0;
 const PCSS_POISSON_COUNT: u32 = 16u;
 const PCSS_BLOCKER_COUNT: u32 = 8u;
+// 0xffffff00: the largest u32-scaled depth exactly representable as f32.
+const SHADOW_DEPTH_SCALE: f32 = 4294967040.0;
 
 var<private> PCSS_POISSON: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
     vec2<f32>(-0.94201624, -0.39906216),
@@ -173,7 +175,7 @@ fn shadow_map_depth(uv: vec2<f32>) -> f32 {
         vec2<i32>(0, 0),
         vec2<i32>(i32(SHADOW_MAP_SIZE) - 1, i32(SHADOW_MAP_SIZE) - 1),
     );
-    return textureLoad(shadow_map, texel, 0).r;
+    return f32(textureLoad(shadow_map, texel, 0).r) / SHADOW_DEPTH_SCALE;
 }
 
 fn average_blocker_depth(uv: vec2<f32>, receiver_depth: f32, bias: f32) -> f32 {
