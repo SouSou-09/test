@@ -88,6 +88,9 @@ fn fs_ao(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         let sample_pixel = vec2<i32>(sample_uv * frame.screen_params.xy);
         let sample_depth = textureLoad(view_depth_texture, sample_pixel, 0).r;
+        if sample_depth <= 0.0001 {
+            continue;
+        }
         let scene_position = view_position_from_depth(sample_uv, sample_depth);
         let range_weight = 1.0 - smoothstep(radius * 0.5, radius, abs(scene_position.z - position.z));
         if scene_position.z > sample_position.z + bias {
