@@ -11,6 +11,8 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
+const GPU_SAMPLE_GRACE_FRAMES: u64 = 16;
+
 struct BenchmarkState {
     target_frames: u32,
     measured_cpu_frames: u32,
@@ -159,18 +161,21 @@ impl AppState {
                     }
                 }
                 let gpu_done = !stats.gpu_timer_enabled
-                    || benchmark.measured_gpu_frames == benchmark.target_frames;
+                    || benchmark.measured_gpu_frames == benchmark.target_frames
+                    || stats.frame_index >= last_measured_frame + GPU_SAMPLE_GRACE_FRAMES;
                 if benchmark.measured_cpu_frames == benchmark.target_frames && gpu_done {
                     let frames = benchmark.target_frames as f32;
+                    let gpu_frames = benchmark.measured_gpu_frames.max(1) as f32;
                     let cpu_submit: u128 = benchmark.cpu_submit_microseconds.iter().sum();
                     let cpu_scene: u128 = benchmark.cpu_scene_microseconds.iter().sum();
                     let gpu: f32 = benchmark.gpu_microseconds.iter().sum();
                     println!(
-                        "{{\"benchmark\":{{\"frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
+                        "{{\"benchmark\":{{\"frames\":{},\"gpu_frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
                         benchmark.target_frames,
+                        benchmark.measured_gpu_frames,
                         cpu_submit as f32 / frames / 1000.0,
                         cpu_scene as f32 / frames / 1000.0,
-                        gpu / frames / 1000.0,
+                        gpu / gpu_frames / 1000.0,
                         stats.visible_instances,
                         stats.culled_instances,
                         stats.scene_draw_calls,
