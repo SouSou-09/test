@@ -30,6 +30,19 @@ pub enum PhysicsShape {
     },
 }
 
+impl PhysicsShape {
+    pub fn bounding_radius(&self) -> f32 {
+        match self {
+            Self::Ball { radius } => *radius,
+            Self::Cuboid { half_extents } => half_extents.length(),
+            Self::TriMesh { vertices, .. } => vertices
+                .iter()
+                .map(|vertex| vertex.length())
+                .fold(0.0, f32::max),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RigidBodySpec {
     pub kind: RigidBodyKind,

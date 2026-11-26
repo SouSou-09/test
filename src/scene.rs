@@ -382,8 +382,8 @@ impl Scene {
         }
 
         for index in 0..44 {
-            let angle = index as f32 / 44.0 * std::f32::consts::TAU + hash01(index, 1) * 0.23;
-            let spawn_radius = 2.4 + hash01(index, 2) * 5.2;
+            let angle = index as f32 * 2.399_963_2;
+            let spawn_radius = 0.8 + ((index as f32 + 0.5) / 44.0).sqrt() * 6.6;
             let position = Vec3::new(
                 angle.cos() * spawn_radius,
                 2.8 + (index % 8) as f32 * 0.42 + hash01(index, 3) * 0.7,
@@ -621,6 +621,30 @@ mod tests {
                 .iter()
                 .all(|object| object.bounding_radius().is_finite())
         );
+    }
+
+    #[test]
+    fn demo_dynamic_bodies_do_not_overlap_at_spawn() {
+        let scene = Scene::demo();
+        let dynamic_objects: Vec<&Object> = scene
+            .objects
+            .iter()
+            .filter(|object| object.has_dynamic_physics())
+            .collect();
+        for (index, object) in dynamic_objects.iter().enumerate() {
+            let object_radius = object.physics.as_ref().unwrap().shape.bounding_radius();
+            for other in &dynamic_objects[..index] {
+                let other_radius = other.physics.as_ref().unwrap().shape.bounding_radius();
+                let distance = object
+                    .transform
+                    .translation
+                    .distance(other.transform.translation);
+                assert!(
+                    distance > object_radius + other_radius + 0.03,
+                    "indices {index} overlap: distance={distance} radii={object_radius}+{other_radius}"
+                );
+            }
+        }
     }
 
     #[test]
