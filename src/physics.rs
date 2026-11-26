@@ -263,9 +263,6 @@ impl PhysicsWorld {
             simulated_dt += FIXED_TIMESTEP;
             substeps += 1;
         }
-        if substeps == MAX_SUBSTEPS {
-            self.accumulator = 0.0;
-        }
         if simulated_dt > 0.0 {
             self.update_respawns(simulated_dt);
         }
@@ -381,6 +378,23 @@ mod tests {
             rebound_height > minimum_height + 0.35,
             "rebound_height={rebound_height} minimum_height={minimum_height}"
         );
+    }
+
+    #[test]
+    fn low_fps_frames_preserve_fractional_physics_time() {
+        let mut low_fps_objects = physics_objects();
+        let mut fixed_objects = physics_objects();
+        let mut low_fps = PhysicsWorld::new(&low_fps_objects);
+        let mut fixed = PhysicsWorld::new(&fixed_objects);
+        for _ in 0..5 {
+            low_fps.step(0.08, &mut low_fps_objects);
+        }
+        for _ in 0..24 {
+            fixed.step(1.0 / 60.0, &mut fixed_objects);
+        }
+        let difference =
+            low_fps_objects[1].transform.translation - fixed_objects[1].transform.translation;
+        assert!(difference.length() < 0.0001, "difference={difference:?}");
     }
 
     #[test]
