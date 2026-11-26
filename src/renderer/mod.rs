@@ -133,7 +133,6 @@ struct GpuTimer {
     slot: usize,
     pending: [bool; GPU_TIMER_SLOTS],
     slot_frame_indices: [u64; GPU_TIMER_SLOTS],
-    slot_submission_indices: [Option<wgpu::SubmissionIndex>; GPU_TIMER_SLOTS],
     map_receivers:
         [Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>; GPU_TIMER_SLOTS],
     active: bool,
@@ -177,7 +176,6 @@ impl GpuTimer {
             slot: 0,
             pending: [false; GPU_TIMER_SLOTS],
             slot_frame_indices: [0; GPU_TIMER_SLOTS],
-            slot_submission_indices: std::array::from_fn(|_| None),
             map_receivers: std::array::from_fn(|_| None),
             active: true,
             last_frame_index: None,
@@ -210,12 +208,7 @@ impl GpuTimer {
         }
     }
 
-    fn finish_frame(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        frame_index: u64,
-    ) -> Option<usize> {
-        let written_slot = self.active.then_some(self.slot);
+    fn finish_frame(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.active {
             let first = self.slot as u32 * GPU_TIMER_QUERIES_PER_FRAME;
             encoder.resolve_query_set(
@@ -235,11 +228,6 @@ impl GpuTimer {
             self.slot_frame_indices[self.slot] = frame_index;
         }
         self.slot = (self.slot + 1) % GPU_TIMER_SLOTS;
-        written_slot
-    }
-
-    fn mark_submitted(&mut self, slot: usize, submission_index: wgpu::SubmissionIndex) {
-        self.slot_submission_indices[slot] = Some(submission_index);
     }
 
     fn read_slot(&mut self, device: &wgpu::Device) -> bool {
@@ -254,20 +242,9 @@ impl GpuTimer {
             self.map_receivers[self.slot] = Some(receiver);
         }
         let _ = device.poll(wgpu::PollType::Poll);
-        let mut result = self.map_receivers[self.slot]
+        let result = self.map_receivers[self.slot]
             .as_ref()
             .map(|receiver| receiver.try_recv());
-        if matches!(result, Some(Err(std::sync::mpsc::TryRecvError::Empty))) {
-            if let Some(submission_index) = self.slot_submission_indices[self.slot].clone() {
-                let _ = device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(submission_index),
-                    timeout: None,
-                });
-                result = self.map_receivers[self.slot]
-                    .as_ref()
-                    .map(|receiver| receiver.try_recv());
-            }
-        }
         let Some(result) = result else {
             return true;
         };
@@ -861,15 +838,11 @@ impl Renderer {
         self.ao_pass(&mut encoder);
         self.bloom_passes(&mut encoder);
         self.composite_pass(&mut encoder, &surface_view);
-        let gpu_timer_slot = self
-            .gpu_timer
-            .as_mut()
-            .and_then(|timer| timer.finish_frame(&mut encoder, frame_index));
-
-        let submission_index = self.queue.submit([encoder.finish()]);
-        if let (Some(timer), Some(slot)) = (self.gpu_timer.as_mut(), gpu_timer_slot) {
-            timer.mark_submitted(slot, submission_index);
+        if let Some(timer) = self.gpu_timer.as_mut() {
+            timer.finish_frame(&mut encoder, frame_index);
         }
+
+        self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(surface_texture);
 
