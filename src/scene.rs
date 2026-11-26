@@ -516,11 +516,25 @@ impl Scene {
             Vec3::new(0.0, 0.55, 0.0),
             Vec3::splat(8.0),
         );
-        if let Err(error) = scene.add_gltf_object(&model_path, asset_transform) {
-            log::warn!(
-                "failed to load bundled glTF asset {}: {error:#}",
-                model_path.display()
-            );
+        let bottle_start = scene.objects.len();
+        match scene.add_gltf_object(&model_path, asset_transform) {
+            Ok(created) => {
+                if created > 0 {
+                    let mut bottle_body = RigidBodySpec::fixed(PhysicsShape::Cylinder {
+                        half_height: 1.04,
+                        radius: 0.44,
+                    });
+                    bottle_body.friction = 0.64;
+                    bottle_body.restitution = 0.08;
+                    scene.objects[bottle_start].physics = Some(bottle_body);
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to load bundled glTF asset {}: {error:#}",
+                    model_path.display()
+                );
+            }
         }
         scene.physics = PhysicsWorld::new(&scene.objects);
         scene

@@ -70,7 +70,7 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 
 - `rapier3d`による3D剛体シミュレーション
 - 地球重力、固定60Hzタイムステップ、最大5サブステップの蓄積式時間統合
-- 球・直方体・三角形メッシュコライダー（動的剛体と静的環境）
+- 球・直方体・円柱・三角形メッシュコライダー（動的剛体と静的環境）
 - density由来の質量/慣性、摩擦、反発係数、線形/角減衰
 - continuous collision detection、sleeping、BVH broadphase
 - 物理姿勢を描画transformへ毎フレーム同期（動的剛体は常時CCD）
