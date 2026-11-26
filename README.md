@@ -27,10 +27,10 @@ PHOTON3D_BENCHMARK_FRAMES=120 cargo run --release
 出力例:
 
 ```json
-{"benchmark":{"frames":5,"cpu_submit_ms_avg":126.5758,"cpu_scene_ms_avg":0.0836,"gpu_ms_avg":121.4311,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
+{"benchmark":{"frames":5,"gpu_frames":5,"cpu_submit_ms_avg":193.5252,"cpu_scene_ms_avg":0.2390,"gpu_ms_avg":186.1782,"visible_instances":571,"culled_instances":771,"scene_draw_calls":5,"shadow_draw_calls":5,"triangles":428360}}
 ```
 
-この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。
+この数値はVM上のllvmpipe（CPUラスタライザ）のものであり、実GPU性能ではありません。最適化前後の比較には同一環境で実行してください。`gpu_frames`が`frames`より少ない場合、非同期readbackが間に合わなかったフレームがあり、GPU平均は取得できたサンプルだけで計算されています。
 
 ## 操作
 
