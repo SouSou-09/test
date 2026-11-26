@@ -15,7 +15,6 @@ struct FrameUniform {
 
 @group(0) @binding(0) var<uniform> frame: FrameUniform;
 @group(0) @binding(1) var shadow_map: texture_2d<f32>;
-@group(0) @binding(2) var shadow_sampler: sampler;
 
 @group(1) @binding(0) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(1) var normal_texture: texture_2d<f32>;
@@ -222,7 +221,7 @@ fn shadow_visibility(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
     let texel_radius = filter_radius / SHADOW_MAP_SIZE;
     for (var index = 0u; index < PCSS_POISSON_COUNT; index = index + 1u) {
         let sample_uv = uv + PCSS_POISSON[index] * texel_radius;
-        let map_depth = textureSample(shadow_map, shadow_sampler, sample_uv).r;
+        let map_depth = shadow_map_depth(sample_uv);
         visibility += select(0.0, 1.0, map_depth + bias >= projected.z);
     }
     return visibility / f32(PCSS_POISSON_COUNT);

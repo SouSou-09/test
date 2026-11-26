@@ -352,10 +352,6 @@ impl BindGroups {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(shadow_color_view),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(filter_sampler),
-                },
             ],
         });
         let shadow = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1519,12 +1515,6 @@ fn create_frame_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
         ],
