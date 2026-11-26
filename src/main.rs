@@ -19,6 +19,7 @@ struct BenchmarkState {
     measured_gpu_frames: u32,
     cpu_submit_microseconds: Vec<u128>,
     cpu_scene_microseconds: Vec<u128>,
+    cpu_physics_microseconds: Vec<u128>,
     gpu_microseconds: Vec<f32>,
     gpu_collected: Vec<bool>,
     done: bool,
@@ -38,6 +39,7 @@ impl BenchmarkState {
             measured_gpu_frames: 0,
             cpu_submit_microseconds: vec![0; sample_count],
             cpu_scene_microseconds: vec![0; sample_count],
+            cpu_physics_microseconds: vec![0; sample_count],
             gpu_microseconds: vec![0.0; sample_count],
             gpu_collected: vec![false; sample_count],
             done: false,
@@ -140,50 +142,54 @@ impl AppState {
         let scene_microseconds = scene_start.elapsed().as_micros();
         let stats = self.renderer.render(&self.scene, &self.camera);
 
-        if let Some(benchmark) = self.benchmark.as_mut() {
-            if !benchmark.done && stats.frame_index > 0 {
-                let first_measured_frame = 31;
-                let last_measured_frame = 30 + benchmark.target_frames as u64;
-                if (first_measured_frame..=last_measured_frame).contains(&stats.frame_index) {
-                    let sample = (stats.frame_index - first_measured_frame) as usize;
-                    benchmark.cpu_submit_microseconds[sample] = stats.frame_microseconds;
-                    benchmark.cpu_scene_microseconds[sample] = scene_microseconds;
-                    benchmark.measured_cpu_frames += 1;
+        if let Some(benchmark) = self.benchmark.as_mut()
+            && !benchmark.done
+            && stats.frame_index > 0
+        {
+            let first_measured_frame = 31;
+            let last_measured_frame = 30 + benchmark.target_frames as u64;
+            if (first_measured_frame..=last_measured_frame).contains(&stats.frame_index) {
+                let sample = (stats.frame_index - first_measured_frame) as usize;
+                benchmark.cpu_submit_microseconds[sample] = stats.frame_microseconds;
+                benchmark.cpu_scene_microseconds[sample] = scene_microseconds;
+                benchmark.cpu_physics_microseconds[sample] = self.scene.last_physics_microseconds;
+                benchmark.measured_cpu_frames += 1;
+            }
+            if let Some(gpu_frame_index) = stats.gpu_frame_index
+                && (first_measured_frame..=last_measured_frame).contains(&gpu_frame_index)
+            {
+                let sample = (gpu_frame_index - first_measured_frame) as usize;
+                if !benchmark.gpu_collected[sample] {
+                    benchmark.gpu_collected[sample] = true;
+                    benchmark.gpu_microseconds[sample] = stats.gpu_frame_microseconds;
+                    benchmark.measured_gpu_frames += 1;
                 }
-                if let Some(gpu_frame_index) = stats.gpu_frame_index {
-                    if (first_measured_frame..=last_measured_frame).contains(&gpu_frame_index) {
-                        let sample = (gpu_frame_index - first_measured_frame) as usize;
-                        if !benchmark.gpu_collected[sample] {
-                            benchmark.gpu_collected[sample] = true;
-                            benchmark.gpu_microseconds[sample] = stats.gpu_frame_microseconds;
-                            benchmark.measured_gpu_frames += 1;
-                        }
-                    }
-                }
-                let gpu_done = !stats.gpu_timer_enabled
-                    || benchmark.measured_gpu_frames == benchmark.target_frames
-                    || stats.frame_index >= last_measured_frame + GPU_SAMPLE_GRACE_FRAMES;
-                if benchmark.measured_cpu_frames == benchmark.target_frames && gpu_done {
-                    let frames = benchmark.target_frames as f32;
-                    let gpu_frames = benchmark.measured_gpu_frames.max(1) as f32;
-                    let cpu_submit: u128 = benchmark.cpu_submit_microseconds.iter().sum();
-                    let cpu_scene: u128 = benchmark.cpu_scene_microseconds.iter().sum();
-                    let gpu: f32 = benchmark.gpu_microseconds.iter().sum();
-                    println!(
-                        "{{\"benchmark\":{{\"frames\":{},\"gpu_frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
-                        benchmark.target_frames,
-                        benchmark.measured_gpu_frames,
-                        cpu_submit as f32 / frames / 1000.0,
-                        cpu_scene as f32 / frames / 1000.0,
-                        gpu / gpu_frames / 1000.0,
-                        stats.visible_instances,
-                        stats.culled_instances,
-                        stats.scene_draw_calls,
-                        stats.shadow_draw_calls,
-                        stats.triangle_count,
-                    );
-                    benchmark.done = true;
-                }
+            }
+            let gpu_done = !stats.gpu_timer_enabled
+                || benchmark.measured_gpu_frames == benchmark.target_frames
+                || stats.frame_index >= last_measured_frame + GPU_SAMPLE_GRACE_FRAMES;
+            if benchmark.measured_cpu_frames == benchmark.target_frames && gpu_done {
+                let frames = benchmark.target_frames as f32;
+                let gpu_frames = benchmark.measured_gpu_frames.max(1) as f32;
+                let cpu_submit: u128 = benchmark.cpu_submit_microseconds.iter().sum();
+                let cpu_scene: u128 = benchmark.cpu_scene_microseconds.iter().sum();
+                let cpu_physics: u128 = benchmark.cpu_physics_microseconds.iter().sum();
+                let gpu: f32 = benchmark.gpu_microseconds.iter().sum();
+                println!(
+                    "{{\"benchmark\":{{\"frames\":{},\"gpu_frames\":{},\"cpu_submit_ms_avg\":{:.4},\"cpu_scene_ms_avg\":{:.4},\"cpu_physics_ms_avg\":{:.4},\"gpu_ms_avg\":{:.4},\"visible_instances\":{},\"culled_instances\":{},\"scene_draw_calls\":{},\"shadow_draw_calls\":{},\"triangles\":{}}}}}",
+                    benchmark.target_frames,
+                    benchmark.measured_gpu_frames,
+                    cpu_submit as f32 / frames / 1000.0,
+                    cpu_scene as f32 / frames / 1000.0,
+                    cpu_physics as f32 / frames / 1000.0,
+                    gpu / gpu_frames / 1000.0,
+                    stats.visible_instances,
+                    stats.culled_instances,
+                    stats.scene_draw_calls,
+                    stats.shadow_draw_calls,
+                    stats.triangle_count,
+                );
+                benchmark.done = true;
             }
         }
 
@@ -193,7 +199,7 @@ impl AppState {
             let fps = self.fps_frames as f32 / self.fps_time;
             let post_gpu = stats.gpu_pass_microseconds[2..].iter().sum::<f32>() / 1000.0;
             self.window.set_title(&format!(
-                "Photon3D — {:.0} fps | {}/{} inst ({} culled) | draws {}+{} | tris {:.1}k | CPU {:.2}/{:.2} ms | GPU {:.2} ms (shadow {:.2}, scene {:.2}, post {:.2})",
+                "Photon3D — {:.0} fps | {}/{} inst ({} culled) | draws {}+{} | tris {:.1}k | CPU {:.2}/{:.2} ms | phys {:.2} ms | GPU {:.2} ms (shadow {:.2}, scene {:.2}, post {:.2})",
                 fps,
                 stats.visible_instances,
                 stats.total_instances,
@@ -203,6 +209,7 @@ impl AppState {
                 stats.triangle_count as f32 / 1000.0,
                 stats.frame_microseconds as f32 / 1000.0,
                 scene_microseconds as f32 / 1000.0,
+                self.scene.last_physics_microseconds as f32 / 1000.0,
                 stats.gpu_frame_microseconds / 1000.0,
                 stats.gpu_pass_microseconds[0] / 1000.0,
                 stats.gpu_pass_microseconds[1] / 1000.0,
@@ -303,12 +310,12 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        if state.mouse_captured {
-            if let DeviceEvent::MouseMotion { delta } = event {
-                state
-                    .camera
-                    .rotate(delta.0 as f32 * 0.0022, -delta.1 as f32 * 0.0022);
-            }
+        if state.mouse_captured
+            && let DeviceEvent::MouseMotion { delta } = event
+        {
+            state
+                .camera
+                .rotate(delta.0 as f32 * 0.0022, -delta.1 as f32 * 0.0022);
         }
     }
 }

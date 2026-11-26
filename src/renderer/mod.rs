@@ -264,8 +264,14 @@ impl GpuTimer {
                     return true;
                 };
                 let mut timestamps = [0_u64; GPU_TIMER_PASSES * 2];
-                for (index, bytes) in data.chunks_exact(8).take(GPU_TIMER_PASSES * 2).enumerate() {
-                    timestamps[index] = u64::from_le_bytes(bytes.try_into().unwrap_or_default());
+                for (index, bytes) in data
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .take(GPU_TIMER_PASSES * 2)
+                    .enumerate()
+                {
+                    timestamps[index] = u64::from_le_bytes(*bytes);
                 }
                 for pass in 0..GPU_TIMER_PASSES {
                     let elapsed = timestamps[pass * 2 + 1].saturating_sub(timestamps[pass * 2]);
